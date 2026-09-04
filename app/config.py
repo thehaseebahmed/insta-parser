@@ -23,7 +23,8 @@ WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
 
 # How many transcriptions may run at once. Whisper is CPU-hungry, so letting several
 # run in parallel on a homelab box makes them all slower. Queue them instead.
-TRANSCRIBE_CONCURRENCY = int(os.environ.get("TRANSCRIBE_CONCURRENCY", "1"))
+# Clamped to at least 1 — a Semaphore(0) would block every transcription forever.
+TRANSCRIBE_CONCURRENCY = max(1, int(os.environ.get("TRANSCRIBE_CONCURRENCY", "1")))
 
 # Hard ceiling on a single ffmpeg invocation, so a hung encode can't pin a worker.
 FFMPEG_TIMEOUT = int(os.environ.get("FFMPEG_TIMEOUT", "300"))

@@ -72,7 +72,7 @@ def extract_place_mentions(
 
     try:
         response = requests.post(
-            f"{config.LITELLM_BASE_URL.rstrip('/')}/chat/completions",
+            f"{config.LITELLM_BASE_URL.rstrip('/')}/v1/chat/completions",
             headers=headers,
             json={
                 "model": config.LITELLM_MODEL,

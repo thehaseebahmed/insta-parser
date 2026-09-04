@@ -84,10 +84,14 @@ environment:
 
 ```bash
 docker run -d --name insta-parser -p 8420:8000 \
-  -v ~/volumes/insta-parser/data:/data \
+  -v ${HOME}/volumes/insta-parser/data:/data \
   -e TZ=Europe/Amsterdam \
-  ghcr.io/thehaseebahmed/insta-parser:latest
+  ghcr.io/thehaseebahmed/insta-parser:main
 ```
+
+`:main` tracks the latest commit on `main`. For a stable deployment, pin a
+released version instead (`:X.Y.Z` — see [Releases](#releases)); there is no
+`:latest` tag.
 
 Or use a `docker-compose.yaml` pointing `image:` at
 `ghcr.io/thehaseebahmed/insta-parser:<version>` — see this repo's own

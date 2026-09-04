@@ -7,7 +7,7 @@ services:
         ports:
             - 8420:8000
         volumes:
-            - ~/volumes/insta-parser/data:/data
+            - ${HOME}/volumes/insta-parser/data:/data
         environment:
             TZ: "Europe/Amsterdam"
             WORK_DIR: "/data"

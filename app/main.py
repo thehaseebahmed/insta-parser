@@ -8,7 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from . import config, pipeline
@@ -27,6 +27,12 @@ SWEEP_INTERVAL_SECONDS = 3600
 # acceptable (and documented in the README).
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
+
+# Strong references to in-flight /process tasks. asyncio only holds a weak
+# reference to a task once its creating coroutine drops it, so a bare
+# `asyncio.create_task(...)` here risks the task being garbage-collected
+# mid-run; keeping it in this set (and discarding on completion) prevents that.
+_background_tasks: set[asyncio.Task] = set()
 
 
 def sweep_old_jobs() -> int:
@@ -141,6 +147,8 @@ def download(req: UrlRequest):
         metadata = pipeline.download_post(req.url, job_dir)
     except pipeline.PipelineError as exc:
         logger.error("job=%s step=download failed: %s", job_id, exc)
+        if job_dir.exists():
+            shutil.rmtree(job_dir, ignore_errors=True)
         raise _http_error(exc, fallback_status=502)
     return {"job_id": job_id, "metadata": metadata}
 
@@ -253,13 +261,20 @@ def _run_pipeline(job_id: str, url: str) -> None:
 
 
 @app.post("/process", status_code=202)
-def process(req: UrlRequest, background_tasks: BackgroundTasks):
+async def process(req: UrlRequest):
     """Kick off the whole pipeline and return immediately. Poll GET /jobs/{job_id}
-    for the result — transcription alone can outlast n8n's HTTP timeout."""
+    for the result — transcription alone can outlast n8n's HTTP timeout.
+
+    Runs as an independent asyncio Task (the sync pipeline itself in a worker
+    thread via asyncio.to_thread) rather than a Starlette BackgroundTask, so
+    the multi-minute pipeline isn't tied to this request/response's ASGI
+    cycle."""
     job_id = uuid.uuid4().hex
     logger.info("job=%s step=process queued url=%s", job_id, req.url)
     _set_job(job_id, status="queued", step=None, result=None, error=None)
-    background_tasks.add_task(_run_pipeline, job_id, req.url)
+    task = asyncio.create_task(asyncio.to_thread(_run_pipeline, job_id, req.url))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"job_id": job_id, "status": "queued"}
 
 
