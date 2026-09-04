@@ -32,6 +32,11 @@ The per-step endpoints are synchronous — each finishes well inside a normal
 HTTP timeout. `/process` is not: whisper transcription alone can run for
 minutes, so it returns immediately and you poll `/jobs/{job_id}`.
 
+Interactive API docs are served by FastAPI directly from the same request/
+response models used above: Swagger UI at `/docs` (try requests against a
+running instance right from the browser), ReDoc at `/redoc`, and the raw
+OpenAPI schema at `/openapi.json`.
+
 ## Configuration (env vars)
 
 | Var | Default | Notes |

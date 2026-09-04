@@ -9,9 +9,22 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 
 from . import config, pipeline
+from .schemas import (
+    AudioResponse,
+    DeleteResponse,
+    DownloadResponse,
+    FramesResponse,
+    HealthResponse,
+    JobRequest,
+    JobStatus,
+    OcrResponse,
+    PlacesResponse,
+    ProcessResponse,
+    TranscribeResponse,
+    UrlRequest,
+)
 
 logging.basicConfig(
     level=config.LOG_LEVEL,
@@ -94,15 +107,17 @@ async def lifespan(app: FastAPI):
         sweeper.cancel()
 
 
-app = FastAPI(title="insta-parser", lifespan=lifespan)
-
-
-class UrlRequest(BaseModel):
-    url: str
-
-
-class JobRequest(BaseModel):
-    job_id: str
+app = FastAPI(
+    title="insta-parser",
+    description=(
+        "Turns an Instagram reel/post URL into text: metadata, a spoken-audio "
+        "transcript, and OCR of on-screen text, with optional place-metadata "
+        "enrichment. See the [README](https://github.com/thehaseebahmed/insta-parser) "
+        "for the CLI and agent skill docs."
+    ),
+    version="0.1.0",
+    lifespan=lifespan,
+)
 
 
 def validated_job_id(job_id: str) -> str:
@@ -133,13 +148,15 @@ def _set_job(job_id: str, **fields) -> None:
 # /health and GET /jobs are async so they run on the event loop rather than the
 # threadpool: background /process runs occupy threadpool workers, and polling
 # must stay responsive even when several pipelines are in flight.
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse, tags=["health"])
 async def health():
+    """Health check."""
     return {"status": "ok"}
 
 
-@app.post("/download")
+@app.post("/download", response_model=DownloadResponse, tags=["pipeline"])
 def download(req: UrlRequest):
+    """Fetch an Instagram post/reel and download its video. Synchronous."""
     job_id = uuid.uuid4().hex
     job_dir = Path(config.WORK_DIR) / job_id
     logger.info("job=%s step=download url=%s", job_id, req.url)
@@ -153,8 +170,9 @@ def download(req: UrlRequest):
     return {"job_id": job_id, "metadata": metadata}
 
 
-@app.post("/extract-audio")
+@app.post("/extract-audio", response_model=AudioResponse, tags=["pipeline"])
 def extract_audio(req: JobRequest):
+    """Extract mp3 audio from the job's downloaded video."""
     job_dir = job_dir_for(req.job_id)
     logger.info("job=%s step=extract-audio", req.job_id)
     try:
@@ -165,8 +183,9 @@ def extract_audio(req: JobRequest):
     return {"job_id": req.job_id, "audio_path": str(audio_path)}
 
 
-@app.post("/transcribe")
+@app.post("/transcribe", response_model=TranscribeResponse, tags=["pipeline"])
 def transcribe(req: JobRequest):
+    """Transcribe the job's audio with faster-whisper."""
     job_dir = job_dir_for(req.job_id)
     logger.info("job=%s step=transcribe", req.job_id)
     try:
@@ -177,8 +196,9 @@ def transcribe(req: JobRequest):
     return {"job_id": req.job_id, **result}
 
 
-@app.post("/extract-frames")
+@app.post("/extract-frames", response_model=FramesResponse, tags=["pipeline"])
 def extract_frames(req: JobRequest):
+    """Grab scene-change frames from the job's video as PNGs."""
     job_dir = job_dir_for(req.job_id)
     logger.info("job=%s step=extract-frames", req.job_id)
     try:
@@ -189,8 +209,9 @@ def extract_frames(req: JobRequest):
     return {"job_id": req.job_id, "frames": [str(f) for f in frames]}
 
 
-@app.post("/ocr")
+@app.post("/ocr", response_model=OcrResponse, tags=["pipeline"])
 def ocr(req: JobRequest):
+    """OCR the job's extracted frames, deduping near-identical consecutive results."""
     job_dir = job_dir_for(req.job_id)
     logger.info("job=%s step=ocr", req.job_id)
     try:
@@ -201,7 +222,7 @@ def ocr(req: JobRequest):
     return {"job_id": req.job_id, "results": results}
 
 
-@app.post("/extract-places")
+@app.post("/extract-places", response_model=PlacesResponse, tags=["pipeline"])
 def extract_places(req: JobRequest):
     """Extract place mentions from the job's caption/transcript/OCR text (via
     litellm) and resolve each against the Google Maps Places API. Requires
@@ -260,7 +281,7 @@ def _run_pipeline(job_id: str, url: str) -> None:
             shutil.rmtree(job_dir, ignore_errors=True)
 
 
-@app.post("/process", status_code=202)
+@app.post("/process", status_code=202, response_model=ProcessResponse, tags=["pipeline"])
 async def process(req: UrlRequest):
     """Kick off the whole pipeline and return immediately. Poll GET /jobs/{job_id}
     for the result — transcription alone can outlast n8n's HTTP timeout.
@@ -278,8 +299,9 @@ async def process(req: UrlRequest):
     return {"job_id": job_id, "status": "queued"}
 
 
-@app.get("/jobs/{job_id}")
+@app.get("/jobs/{job_id}", response_model=JobStatus, tags=["jobs"])
 async def get_job(job_id: str):
+    """Get the status/result of a /process job (or a per-step job's file-presence)."""
     validated_job_id(job_id)
     with _jobs_lock:
         job = dict(_jobs.get(job_id, {}))
@@ -294,8 +316,9 @@ async def get_job(job_id: str):
     return {"job_id": job_id, **job}
 
 
-@app.delete("/jobs/{job_id}")
+@app.delete("/jobs/{job_id}", response_model=DeleteResponse, tags=["jobs"])
 def delete_job(job_id: str):
+    """Delete a job's files and any in-memory record of it."""
     job_dir = job_dir_for(job_id)
     logger.info("job=%s deleting %s", job_id, job_dir)
     shutil.rmtree(job_dir, ignore_errors=True)

@@ -39,7 +39,12 @@ def test_download_success_returns_job_id_and_metadata(client):
         resp = client.post("/download", json={"url": "https://www.instagram.com/reel/ABC/"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["metadata"] == metadata
+    # The response model documents fields (like "places") this mock never
+    # set, so they're present but null rather than absent — check the ones
+    # this test actually cares about instead of exact dict equality.
+    assert body["metadata"]["shortcode"] == "ABC"
+    assert body["metadata"]["username"] == "u"
+    assert body["metadata"]["caption"] == "c"
     assert len(body["job_id"]) == 32
 
 
@@ -93,7 +98,10 @@ def test_ocr_success(client, tmp_path):
     with patch.object(pipeline, "run_ocr", return_value=[{"text": "hi", "confidence": 90.0}]):
         resp = client.post("/ocr", json={"job_id": job_id})
     assert resp.status_code == 200
-    assert resp.json()["results"] == [{"text": "hi", "confidence": 90.0}]
+    results = resp.json()["results"]
+    assert len(results) == 1
+    assert results[0]["text"] == "hi"
+    assert results[0]["confidence"] == 90.0
 
 
 def test_extract_places_success(client, tmp_path):
@@ -155,8 +163,10 @@ def test_process_runs_the_pipeline_in_the_background_and_completes(client):
 
     assert job["status"] == "done"
     assert job["result"]["metadata"]["username"] == "u"
-    # KEEP_FILES=False (set by the `client` fixture) -> video_path is stripped.
-    assert "video_path" not in job["result"]["metadata"]
+    # KEEP_FILES=False (set by the `client` fixture) -> video_path is stripped
+    # from the underlying result; the response model still declares the key,
+    # so it comes back null rather than being absent.
+    assert job["result"]["metadata"]["video_path"] is None
 
 
 def test_process_pipeline_error_marks_the_job_as_error(client):
@@ -168,3 +178,48 @@ def test_process_pipeline_error_marks_the_job_as_error(client):
 
     assert job["status"] == "error"
     assert "rate limited" in job["error"]
+
+
+def test_process_keeps_video_path_when_keep_files_is_true(client, monkeypatch):
+    # Contrasts with the KEEP_FILES=False case above: video_path should be a
+    # real value, not just always-null, proving the response model didn't
+    # erase the stripping behavior it documents.
+    monkeypatch.setattr(main_module.config, "KEEP_FILES", True)
+    fake_metadata = {"shortcode": "ABC", "username": "u", "caption": "c", "video_path": "/x/video.mp4"}
+    fake_transcript = {"text": "hi", "segments": [], "language": "en"}
+
+    with patch.object(pipeline, "download_post", return_value=dict(fake_metadata)), patch.object(
+        pipeline, "extract_audio", return_value=None
+    ), patch.object(pipeline, "transcribe", return_value=fake_transcript), patch.object(
+        pipeline, "extract_frames", return_value=[]
+    ), patch.object(
+        pipeline, "run_ocr", return_value=[]
+    ), patch.object(
+        pipeline, "build_places", return_value=[]
+    ):
+        resp = client.post("/process", json={"url": "https://www.instagram.com/reel/ABC/"})
+        job_id = resp.json()["job_id"]
+        job = _poll_until_terminal(client, job_id)
+
+    assert job["result"]["metadata"]["video_path"] == "/x/video.mp4"
+
+
+def test_swagger_ui_is_served(client):
+    resp = client.get("/docs")
+    assert resp.status_code == 200
+    assert "swagger" in resp.text.lower()
+
+
+def test_openapi_schema_documents_response_shapes(client):
+    # Regression test: before response models were added, every endpoint's
+    # response schema in the OpenAPI doc was an empty {} (Swagger showed no
+    # shape at all). This pins down that it's a real, named schema now.
+    schema = client.get("/openapi.json").json()
+    assert schema["info"]["title"] == "insta-parser"
+
+    process_schema = schema["paths"]["/process"]["post"]["responses"]["202"]["content"]["application/json"]["schema"]
+    assert process_schema == {"$ref": "#/components/schemas/ProcessResponse"}
+
+    job_schema = schema["components"]["schemas"]["JobStatus"]["properties"]
+    assert "job_id" in job_schema
+    assert "updated_at" in job_schema
