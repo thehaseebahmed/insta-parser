@@ -191,8 +191,24 @@ async function main() {
   }
 }
 
-main().catch((exc) => {
-  const message = exc instanceof CliError ? exc.message : `Unexpected error: ${exc.stack || exc.message}`;
-  process.stderr.write(JSON.stringify({ error: message }, null, 2) + "\n");
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((exc) => {
+    const message = exc instanceof CliError ? exc.message : `Unexpected error: ${exc.stack || exc.message}`;
+    process.stderr.write(JSON.stringify({ error: message }, null, 2) + "\n");
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  CliError,
+  parseArgs,
+  baseUrlFrom,
+  positiveNumber,
+  request,
+  jobStart,
+  jobStatus,
+  jobDelete,
+  jobWait,
+  health,
+  main,
+};

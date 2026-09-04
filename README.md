@@ -118,6 +118,22 @@ Every push to `main` also rebuilds and republishes
 `ghcr.io/thehaseebahmed/insta-parser:main` as a rolling image. See
 [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
+## Testing
+
+Every pull request runs [`.github/workflows/test.yml`](.github/workflows/test.yml):
+the Python test suite and the CLI's test suite, each independent of the
+other and of any real Instagram/ffmpeg/tesseract/whisper calls (those are
+mocked — no external services, binaries, or credentials needed).
+
+```bash
+# Python (FastAPI app + pipeline + places enrichment)
+pip install -r requirements.txt -r requirements-test.txt
+pytest
+
+# CLI
+cd cli && node --test
+```
+
 ## Example usage
 
 ```bash
