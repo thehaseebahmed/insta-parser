@@ -120,8 +120,12 @@ Pushing a `vX.Y.Z` tag builds and publishes:
 - The CLI to GitHub Packages as `@thehaseebahmed/insta-parser-cli@X.Y.Z`
 
 Every push to `main` also rebuilds and republishes
-`ghcr.io/thehaseebahmed/insta-parser:main` as a rolling image. See
-[`.github/workflows/release.yml`](.github/workflows/release.yml).
+`ghcr.io/thehaseebahmed/insta-parser:main` as a rolling image.
+
+Every push to an open PR's branch builds and publishes
+`ghcr.io/thehaseebahmed/insta-parser:pr-<number>-<short sha>` (e.g.
+`pr-1-460bbe1`) — an image of that exact commit, to pull and test before
+merging. See [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 ## Testing
 
