@@ -1,12 +1,7 @@
----
-name: insta-parser-ops
-description: Diagnose and fix the self-hosted insta-parser container — failing requests, Instagram rate limiting, ffmpeg or tesseract errors, slow transcription, disk usage, and session login setup. Use when insta-parser returns errors, hangs, or needs configuration changed, rather than when simply calling its API.
----
-
 # Operating insta-parser
 
 Troubleshooting and configuration for the `insta-parser` container. For
-*calling* the service, use the `insta-parser-api` skill instead.
+*calling* the service, see [`../SKILL.md`](../SKILL.md) instead.
 
 Deployed from a `docker-compose.yaml` pointing at the published
 `ghcr.io/thehaseebahmed/insta-parser` image (see the dotfiles repo's
@@ -43,10 +38,10 @@ docker compose pull && docker compose up -d   # update to the latest pinned imag
 ```
 
 Deployments run a published image (`ghcr.io/thehaseebahmed/insta-parser`, see
-[Releases](../../README.md#releases)) — updating means bumping the `image:`
+[Releases](../../../README.md#releases)) — updating means bumping the `image:`
 tag in `docker-compose.yaml` and pulling, not rebuilding. Only a local
 development checkout (`docker compose up -d --build` against this repo's own
-[`docker-compose.yaml`](../../docker-compose.yaml)) builds from the
+[`docker-compose.yaml`](../../../docker-compose.yaml)) builds from the
 `Dockerfile` directly.
 
 ## Symptom → cause
@@ -202,11 +197,11 @@ question, not a crash to chase in the main logs.
   worked; only the Maps lookup didn't.
 - **Warnings like `Place extraction via litellm failed: ...`** in the logs —
   same cross-container networking issue as reaching insta-parser itself from
-  n8n (see the ops note in `insta-parser-api`): a bare container name for
-  `LITELLM_BASE_URL` won't resolve across compose networks. Use the host's
-  `docker0` gateway IP (`172.17.0.1`) or LAN/Tailscale address, and confirm
-  with `docker compose exec insta-parser curl -s $LITELLM_BASE_URL/health`
-  (or whatever health path litellm exposes).
+  n8n (see "Reaching the service" in [`../SKILL.md`](../SKILL.md)): a bare
+  container name for `LITELLM_BASE_URL` won't resolve across compose
+  networks. Use the host's `docker0` gateway IP (`172.17.0.1`) or LAN/Tailscale
+  address, and confirm with `docker compose exec insta-parser curl -s
+  $LITELLM_BASE_URL/health` (or whatever health path litellm exposes).
 - **Warnings like `Google Maps lookup failed for ...`** — check the key is
   valid and unrestricted for server-side use, and that the project has
   billing enabled; the Places API (New) doesn't work on a fresh key with no

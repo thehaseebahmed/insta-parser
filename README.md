@@ -8,10 +8,8 @@ Each job gets its own subfolder under `WORK_DIR` (a random `job_id`), so the
 per-step endpoints can be called independently and re-run without stepping
 on each other.
 
-Agent-facing docs live in [`skills/`](skills/) — `insta-parser-api` for calling
-the service, `insta-parser-ops` for running it. A CLI wrapper over the
-`/process`+`/jobs` path lives in [`cli/`](cli/) — see its README for setup and
-installation from GitHub Packages.
+Agent-facing docs live in [`skills/insta-parser/`](skills/insta-parser/) —
+`SKILL.md` for calling the service, `reference/operations.md` for running it.
 
 ## Endpoints
 
@@ -115,9 +113,8 @@ exposed via a reverse proxy or Tailscale by default — there's no auth on it.
 
 ## Releases
 
-Pushing a `vX.Y.Z` tag builds and publishes:
-- The Docker image to `ghcr.io/thehaseebahmed/insta-parser:X.Y.Z`
-- The CLI to GitHub Packages as `@thehaseebahmed/insta-parser-cli@X.Y.Z`
+Pushing a `vX.Y.Z` tag builds and publishes the Docker image to
+`ghcr.io/thehaseebahmed/insta-parser:X.Y.Z`.
 
 Every push to `main` also rebuilds and republishes
 `ghcr.io/thehaseebahmed/insta-parser:main` as a rolling image.
@@ -130,17 +127,14 @@ merging. See [`.github/workflows/release.yml`](.github/workflows/release.yml).
 ## Testing
 
 Every pull request runs [`.github/workflows/test.yml`](.github/workflows/test.yml):
-the Python test suite and the CLI's test suite, each independent of the
-other and of any real Instagram/ffmpeg/tesseract/whisper calls (those are
-mocked — no external services, binaries, or credentials needed).
+the Python test suite, independent of any real Instagram/ffmpeg/tesseract/
+whisper calls (those are mocked — no external services, binaries, or
+credentials needed).
 
 ```bash
 # Python (FastAPI app + pipeline + places enrichment)
 pip install -r requirements.txt -r requirements-test.txt
 pytest
-
-# CLI
-cd cli && node --test
 ```
 
 ## Example usage
@@ -239,8 +233,8 @@ extraction doesn't run at all and `places` comes back `[]`; no
 `rating`/`maps_url` set to `null`. A failed litellm or Maps call is logged and
 treated the same as unconfigured — it never fails `/process`. Since `[]` means
 both "not configured" and "configured, found nothing", don't treat an empty
-`places` as proof the reel has none — see the `insta-parser-api` skill for how
-to read it.
+`places` as proof the reel has none — see the
+[`insta-parser` skill](skills/insta-parser/SKILL.md) for how to read it.
 
 ## Notes
 

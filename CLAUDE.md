@@ -11,16 +11,12 @@ pytest
 pytest tests/test_pipeline.py::TestExtractShortcode::test_valid_urls   # single test
 pytest -k places                                                       # by keyword
 
-# CLI tests
-cd cli && node --test
-cd cli && node --test test/cli.test.js
-
 # Run the service locally (needs ffmpeg + tesseract, which the image installs)
 docker compose up -d --build && docker compose logs -f   # → http://localhost:8420
 ```
 
 There is no linter or formatter configured. CI (`.github/workflows/test.yml`) runs
-`pytest -v` and `node --test` on every PR, as two independent jobs.
+`pytest -v` on every PR.
 
 ## Architecture
 
@@ -79,17 +75,18 @@ since `Semaphore(0)` would deadlock every transcription).
 
 ## Docs that must move with the code
 
-`skills/insta-parser-api/SKILL.md` and `skills/insta-parser-ops/SKILL.md` are portable
-agent skills describing the live service. Per `skills/README.md`, any change to the API
-surface, error codes, or env vars must update the matching skill **in the same commit**
-— a stale skill is worse than none, because an agent follows it confidently.
+`skills/insta-parser/SKILL.md` is a portable agent skill describing the live
+service; `skills/insta-parser/reference/operations.md` covers running/tuning it.
+Per `skills/README.md`, any change to the API surface, error codes, or env vars
+must update the matching part **in the same commit** — a stale skill is worse
+than none, because an agent follows it confidently.
 
-Adding a config var means touching four places: `app/config.py`, the env-var table in
-`README.md`, the commented block in `docker-compose.yaml`, and the relevant skill.
+Adding a config var means touching four places: `app/config.py`, the env-var
+table in `README.md`, the commented block in `docker-compose.yaml`, and the
+tuning table in `skills/insta-parser/reference/operations.md`.
 
 ## Releases
 
-Tag `vX.Y.Z` publishes both `ghcr.io/thehaseebahmed/insta-parser:X.Y.Z` and
-`@thehaseebahmed/insta-parser-cli@X.Y.Z` (GitHub Packages), so `cli/package.json`'s
-version and the app version travel together. Pushes to `main` republish the rolling
-`:main` tag; PR pushes publish `:pr-<number>-<sha>`. There is no `:latest`.
+Tag `vX.Y.Z` publishes `ghcr.io/thehaseebahmed/insta-parser:X.Y.Z`. Pushes to
+`main` republish the rolling `:main` tag; PR pushes publish
+`:pr-<number>-<sha>`. There is no `:latest`.
