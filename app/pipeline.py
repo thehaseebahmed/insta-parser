@@ -2,6 +2,12 @@
 extraction, and OCR. Kept separate from main.py so each step is a plain
 function that FastAPI endpoints (and the /process orchestrator) can call
 directly, without going through HTTP.
+
+A post is a *list* of media items (one for a plain reel or photo, up to ten for
+a carousel), so every step after /download iterates the manifest written into
+metadata.json and keys its own artifacts off each item's 1-based index. Video
+items get audio + a transcript + scene-change frames; image items get a single
+normalised frame. Both end up as OCR input.
 """
 
 import json
@@ -13,7 +19,7 @@ from pathlib import Path
 
 import instaloader
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageOps
 from rapidfuzz import fuzz
 
 from . import config
@@ -42,16 +48,52 @@ def extract_shortcode(url: str) -> str:
     return match.group(1)
 
 
+_MEDIA_FILE_RE = re.compile(r"^media(?:_(\d+))?\.(mp4|jpe?g|png|webp)$", re.IGNORECASE)
+_VIDEO_EXTS = {"mp4"}
+
+
+def _collect_media(job_dir: Path) -> list[dict]:
+    """Find the file(s) instaloader dropped for this post, rename them to
+    media_01.<ext>, media_02.<ext>... in carousel order, and classify each as
+    "video" or "image". A single-item post (reel or photo) still gets media_01
+    — there is no unnumbered alias, per the clean-break file layout."""
+    candidates = []
+    for path in job_dir.iterdir():
+        match = _MEDIA_FILE_RE.match(path.name)
+        if not match:
+            continue
+        # A lone reel/photo has no _N suffix at all; treat that as position 1
+        # rather than sorting it ahead of/behind numbered siblings by name.
+        position = int(match.group(1)) if match.group(1) else 1
+        candidates.append((position, path, match.group(2).lower()))
+
+    if not candidates:
+        raise PipelineError(f"Instaloader reported success but no media file was found in {job_dir}")
+
+    # Sort numerically (not lexically) so media_10 doesn't land before media_2.
+    candidates.sort(key=lambda c: c[0])
+
+    media = []
+    for index, (_, path, ext) in enumerate(candidates, start=1):
+        ext = "jpg" if ext == "jpeg" else ext
+        media_type = "video" if ext in _VIDEO_EXTS else "image"
+        new_path = job_dir / f"media_{index:02d}.{ext}"
+        if path != new_path:
+            path = path.rename(new_path)
+        media.append({"index": index, "type": media_type, "path": str(path)})
+    return media
+
+
 def download_post(url: str, job_dir: Path) -> dict:
     shortcode = extract_shortcode(url)
     job_dir.mkdir(parents=True, exist_ok=True)
 
     loader = instaloader.Instaloader(
         dirname_pattern=str(job_dir),
-        filename_pattern="video",
+        filename_pattern="media",
         download_videos=True,
         download_video_thumbnails=False,
-        download_pictures=False,
+        download_pictures=True,
         download_geotags=False,
         download_comments=False,
         save_metadata=False,
@@ -75,27 +117,25 @@ def download_post(url: str, job_dir: Path) -> dict:
             f"(private/removed post, or rate-limited?): {exc}"
         ) from exc
 
-    if not post.is_video:
-        raise InvalidInputError(f"Post '{shortcode}' has no video (not a reel/video post)")
-
     try:
         loader.download_post(post, target=shortcode)
     except instaloader.exceptions.InstaloaderException as exc:
-        logger.error("Failed to download video for %s: %s", shortcode, exc)
-        raise PipelineError(f"Failed to download video for '{shortcode}': {exc}") from exc
+        logger.error("Failed to download media for %s: %s", shortcode, exc)
+        raise PipelineError(f"Failed to download media for '{shortcode}': {exc}") from exc
 
-    video_files = sorted(job_dir.glob("*.mp4"))
-    if not video_files:
-        raise PipelineError(f"Instaloader reported success but no .mp4 file was found in {job_dir}")
-    if len(video_files) > 1:
-        logger.warning("Post %s has %d videos; only processing the first one", shortcode, len(video_files))
-
-    video_path = video_files[0]
-    if video_path.name != "video.mp4":
-        video_path = video_path.rename(job_dir / "video.mp4")
+    media = _collect_media(job_dir)
+    try:
+        expected = post.mediacount
+    except instaloader.exceptions.InstaloaderException:
+        expected = len(media)
+    if expected and len(media) != expected:
+        logger.warning(
+            "Post %s reported %d media item(s) but only %d were downloaded",
+            shortcode, expected, len(media),
+        )
 
     # Every field below is a lazy property that can hit the network, so any of
-    # them may fail with a rate-limit error even though the video downloaded.
+    # them may fail with a rate-limit error even though the media downloaded.
     try:
         location = post.location.name if post.location else None
     except instaloader.exceptions.InstaloaderException as exc:
@@ -117,7 +157,7 @@ def download_post(url: str, job_dir: Path) -> dict:
             "like_count": post.likes,
             "comment_count": post.comments,
             "location": location,
-            "video_path": str(video_path),
+            "media": media,
         }
     except instaloader.exceptions.InstaloaderException as exc:
         logger.error("Failed to read metadata for %s: %s", shortcode, exc)
@@ -127,11 +167,17 @@ def download_post(url: str, job_dir: Path) -> dict:
     return metadata
 
 
-def _video_path(job_dir: Path) -> Path:
-    video_path = job_dir / "video.mp4"
-    if not video_path.exists():
-        raise PipelineError(f"No downloaded video for this job (expected {video_path}); call /download first")
-    return video_path
+def _media_manifest(job_dir: Path) -> list[dict]:
+    """Read the media manifest /download wrote into metadata.json. Every step
+    after /download keys off this rather than re-globbing job_dir, so a step
+    called out of order fails with a clear "call /download first" instead of
+    silently finding nothing."""
+    metadata_path = job_dir / "metadata.json"
+    if metadata_path.exists():
+        media = json.loads(metadata_path.read_text()).get("media") or []
+        if media:
+            return media
+    raise PipelineError(f"No downloaded media for this job (expected {metadata_path}); call /download first")
 
 
 def _run_ffmpeg(cmd: list[str], step: str) -> None:
@@ -156,40 +202,76 @@ def _run_ffmpeg(cmd: list[str], step: str) -> None:
         raise PipelineError(f"ffmpeg failed during {step}: {stderr_tail or 'unknown error'}")
 
 
-def extract_audio(job_dir: Path) -> Path:
-    video_path = _video_path(job_dir)
-    audio_path = job_dir / "audio.mp3"
-    _run_ffmpeg(
-        ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-acodec", "libmp3lame", str(audio_path)],
-        step="audio extraction",
-    )
-    return audio_path
+def extract_audio(job_dir: Path) -> list[dict]:
+    """Extract mp3 audio for every video item in the post. Image items have no
+    audio; a post with no video items at all is a valid 200 no-op rather than
+    an error, so /extract-audio and /transcribe can be called unconditionally
+    in a fixed step order regardless of post type."""
+    media = _media_manifest(job_dir)
+    video_items = [item for item in media if item["type"] == "video"]
+    if not video_items:
+        return []
 
-
-def extract_frames(job_dir: Path) -> list[Path]:
-    video_path = _video_path(job_dir)
-    frames_dir = job_dir / "frames"
-    frames_dir.mkdir(exist_ok=True)
-    # -vsync vfr keeps only the frames the select filter passes. Newer ffmpeg
-    # builds prefer -fps_mode vfr but still accept -vsync with a warning.
-    _run_ffmpeg(
-        [
-            "ffmpeg", "-y", "-i", str(video_path),
-            "-vf", f"select='gt(scene,{config.SCENE_THRESHOLD})',scale=-2:{config.FRAME_SCALE_HEIGHT}",
-            "-vsync", "vfr",
-            "-frames:v", str(config.MAX_FRAMES),
-            "-an",
-            str(frames_dir / "frame_%04d.png"),
-        ],
-        step="frame extraction",
-    )
-    frames = sorted(frames_dir.glob("frame_*.png"))
-    if len(frames) >= config.MAX_FRAMES:
-        logger.warning(
-            "Frame extraction hit the MAX_FRAMES cap (%d); later scene changes were dropped",
-            config.MAX_FRAMES,
+    audio_dir = job_dir / "audio"
+    audio_dir.mkdir(exist_ok=True)
+    results = []
+    for item in video_items:
+        audio_path = audio_dir / f"media_{item['index']:02d}.mp3"
+        _run_ffmpeg(
+            ["ffmpeg", "-y", "-i", item["path"], "-vn", "-acodec", "libmp3lame", str(audio_path)],
+            step=f"audio extraction (media_{item['index']:02d})",
         )
-    return frames
+        results.append({"index": item["index"], "path": str(audio_path)})
+    return results
+
+
+def extract_frames(job_dir: Path) -> list[dict]:
+    """Produce OCR-ready frames for every media item: scene-change frames for
+    a video (capped at MAX_FRAMES per item), a single normalised frame for an
+    image."""
+    media = _media_manifest(job_dir)
+    frames_root = job_dir / "frames"
+    frames_root.mkdir(exist_ok=True)
+
+    results = []
+    for item in media:
+        index, media_type, path = item["index"], item["type"], item["path"]
+        item_dir = frames_root / f"media_{index:02d}"
+        item_dir.mkdir(exist_ok=True)
+
+        if media_type == "video":
+            # -vsync vfr keeps only the frames the select filter passes. Newer
+            # ffmpeg builds prefer -fps_mode vfr but still accept -vsync with
+            # a warning.
+            _run_ffmpeg(
+                [
+                    "ffmpeg", "-y", "-i", path,
+                    "-vf", f"select='gt(scene,{config.SCENE_THRESHOLD})',scale=-2:{config.FRAME_SCALE_HEIGHT}",
+                    "-vsync", "vfr",
+                    "-frames:v", str(config.MAX_FRAMES),
+                    "-an",
+                    str(item_dir / "frame_%04d.png"),
+                ],
+                step=f"frame extraction (media_{index:02d})",
+            )
+            frames = sorted(item_dir.glob("frame_*.png"))
+            if len(frames) >= config.MAX_FRAMES:
+                logger.warning(
+                    "media_%02d hit the MAX_FRAMES cap (%d); later scene changes were dropped",
+                    index, config.MAX_FRAMES,
+                )
+        else:
+            # A still image contributes exactly one frame — no scene-count
+            # motivation to downscale it like video frames, and native
+            # resolution helps OCR read small overlay text.
+            _run_ffmpeg(
+                ["ffmpeg", "-y", "-i", path, "-frames:v", "1", str(item_dir / "frame_0001.png")],
+                step=f"frame extraction (media_{index:02d})",
+            )
+            frames = sorted(item_dir.glob("frame_*.png"))
+
+        results.append({"index": index, "type": media_type, "frames": [str(f) for f in frames]})
+    return results
 
 
 _whisper_model = None
@@ -221,48 +303,80 @@ def _get_whisper_model():
 
 
 def transcribe(job_dir: Path) -> dict:
-    audio_path = job_dir / "audio.mp3"
-    if not audio_path.exists():
-        raise PipelineError(f"No extracted audio for this job (expected {audio_path}); call /extract-audio first")
+    """Transcribe every video item's audio. A post with no video items is a
+    valid 200 no-op (empty media list), matching /extract-audio."""
+    media = _media_manifest(job_dir)
+    video_items = [item for item in media if item["type"] == "video"]
+    if not video_items:
+        result = {"media": []}
+        (job_dir / "transcript.json").write_text(json.dumps(result, indent=2))
+        return result
 
     model = _get_whisper_model()
-    try:
-        with _transcribe_semaphore:
-            segments_gen, info = model.transcribe(
-                str(audio_path),
-                vad_filter=config.WHISPER_VAD_FILTER,
-                # Disabled regardless of VAD: once a window hallucinates, conditioning
-                # on its (bad) text can drag subsequent windows into a repetition
-                # loop. Short reels don't need cross-window consistency badly enough
-                # to be worth that risk.
-                condition_on_previous_text=False,
+    items = []
+    for item in video_items:
+        index = item["index"]
+        audio_path = job_dir / "audio" / f"media_{index:02d}.mp3"
+        if not audio_path.exists():
+            raise PipelineError(
+                f"No extracted audio for this job (expected {audio_path}); call /extract-audio first"
             )
-            # transcribe() returns a lazy generator; it must be drained inside
-            # the semaphore or the real work happens after we release it.
-            segments = [
-                {"start": seg.start, "end": seg.end, "text": seg.text.strip()}
-                for seg in segments_gen
-            ]
-    except Exception as exc:
-        logger.error("Transcription failed for %s: %s", job_dir, exc)
-        raise PipelineError(f"Transcription failed: {exc}") from exc
 
-    result = {
-        "text": " ".join(seg["text"] for seg in segments).strip(),
-        "segments": segments,
-        "language": info.language,
-    }
+        try:
+            with _transcribe_semaphore:
+                segments_gen, info = model.transcribe(
+                    str(audio_path),
+                    vad_filter=config.WHISPER_VAD_FILTER,
+                    # Disabled regardless of VAD: once a window hallucinates, conditioning
+                    # on its (bad) text can drag subsequent windows into a repetition
+                    # loop. Short reels don't need cross-window consistency badly enough
+                    # to be worth that risk.
+                    condition_on_previous_text=False,
+                )
+                # transcribe() returns a lazy generator; it must be drained inside
+                # the semaphore or the real work happens after we release it.
+                segments = [
+                    {"start": seg.start, "end": seg.end, "text": seg.text.strip()}
+                    for seg in segments_gen
+                ]
+        except Exception as exc:
+            logger.error("Transcription failed for %s (media_%02d): %s", job_dir, index, exc)
+            raise PipelineError(f"Transcription failed: {exc}") from exc
+
+        items.append({
+            "index": index,
+            "text": " ".join(seg["text"] for seg in segments).strip(),
+            "segments": segments,
+            "language": info.language,
+        })
+
+    result = {"media": items}
     (job_dir / "transcript.json").write_text(json.dumps(result, indent=2))
     return result
 
 
-def _ocr_frame(frame: Path) -> tuple[str, float]:
-    """OCR one frame, returning its text and mean word confidence."""
-    # Image.open is lazy: PIL releases the fd once the image is fully read, but
-    # not if the consumer raises first. The context manager makes it deterministic.
-    with Image.open(frame) as img:
-        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+_OCR_PSM_MODES = ("--psm 3", "--psm 11")  # 3 = fully automatic; 11 = sparse text
+# Tesseract accuracy drops sharply on small stylized text; a video frame that
+# was downscaled for frame-count reasons, or a small source image, both land
+# under this height often enough to be worth recovering.
+_OCR_UPSCALE_BELOW_HEIGHT = 1000
+_OCR_UPSCALE_TARGET_HEIGHT = 1500
+_OCR_MAX_UPSCALE = 2.0
 
+
+def _preprocess_for_ocr(img: Image.Image) -> Image.Image:
+    """Grayscale + autocontrast, and upscale a small frame — cheap
+    preprocessing that noticeably helps Tesseract on stylized/low-contrast
+    social media text overlays."""
+    img = img.convert("L")
+    img = ImageOps.autocontrast(img, cutoff=1)
+    if img.height < _OCR_UPSCALE_BELOW_HEIGHT:
+        scale = min(_OCR_MAX_UPSCALE, _OCR_UPSCALE_TARGET_HEIGHT / img.height)
+        img = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
+    return img
+
+
+def _score_ocr_data(data: dict) -> tuple[str, float]:
     # Pair each word with its own confidence; tesseract emits rows for
     # whitespace-only boxes whose low confidence would skew the average.
     scored = [
@@ -278,37 +392,70 @@ def _ocr_frame(frame: Path) -> tuple[str, float]:
     return text, confidence
 
 
+def _ocr_frame(frame: Path) -> tuple[str, float]:
+    """OCR one frame, returning its text and mean word confidence. Tries a
+    couple of Tesseract page-segmentation modes on the preprocessed frame and
+    keeps whichever scores higher; a result below OCR_MIN_CONFIDENCE is
+    treated as no text rather than surfaced as noise."""
+    # Image.open is lazy: PIL releases the fd once the image is fully read, but
+    # not if the consumer raises first. The context manager makes it deterministic.
+    with Image.open(frame) as img:
+        img = _preprocess_for_ocr(img)
+        best_text, best_confidence = "", 0.0
+        for psm in _OCR_PSM_MODES:
+            data = pytesseract.image_to_data(img, config=psm, output_type=pytesseract.Output.DICT)
+            text, confidence = _score_ocr_data(data)
+            if confidence > best_confidence:
+                best_text, best_confidence = text, confidence
+
+    if best_confidence < config.OCR_MIN_CONFIDENCE:
+        return "", 0.0
+    return best_text, best_confidence
+
+
 def run_ocr(job_dir: Path) -> list[dict]:
-    frames_dir = job_dir / "frames"
-    frames = sorted(frames_dir.glob("frame_*.png"))
-    if not frames:
-        raise PipelineError(
-            f"No extracted frames for this job (expected files under {frames_dir}); call /extract-frames first"
-        )
+    media = _media_manifest(job_dir)
+    frames_root = job_dir / "frames"
 
     results = []
-    last_text = None
-    for frame in frames:
-        try:
-            text, confidence = _ocr_frame(frame)
-        except pytesseract.TesseractNotFoundError:
-            # Not a per-frame problem: every frame would fail the same way, and
-            # swallowing it would return an empty result set as if it succeeded.
-            logger.error("tesseract binary not found on PATH")
+    for item in media:
+        index, media_type = item["index"], item["type"]
+        item_dir = frames_root / f"media_{index:02d}"
+        frames = sorted(item_dir.glob("frame_*.png"))
+        if not frames:
             raise PipelineError(
-                "tesseract is not installed in this container — the image should install it via apt"
+                f"No extracted frames for this job (expected files under {item_dir}); call /extract-frames first"
             )
-        except Exception as exc:
-            logger.warning("Tesseract failed on %s: %s", frame, exc)
-            continue
 
-        if not text:
-            continue
-        if last_text is not None and fuzz.ratio(text, last_text) >= config.OCR_DEDUPE_THRESHOLD:
-            continue
+        item_results = []
+        # Reset per item: two different carousel slides that happen to carry
+        # the same text should both survive, since attribution to a specific
+        # slide is the point — only consecutive frames *within* one item are
+        # deduped.
+        last_text = None
+        for frame in frames:
+            try:
+                text, confidence = _ocr_frame(frame)
+            except pytesseract.TesseractNotFoundError:
+                # Not a per-frame problem: every frame would fail the same way, and
+                # swallowing it would return an empty result set as if it succeeded.
+                logger.error("tesseract binary not found on PATH")
+                raise PipelineError(
+                    "tesseract is not installed in this container — the image should install it via apt"
+                )
+            except Exception as exc:
+                logger.warning("Tesseract failed on %s: %s", frame, exc)
+                continue
 
-        results.append({"frame": str(frame), "text": text, "confidence": confidence})
-        last_text = text
+            if not text:
+                continue
+            if last_text is not None and fuzz.ratio(text, last_text) >= config.OCR_DEDUPE_THRESHOLD:
+                continue
+
+            item_results.append({"frame": str(frame), "text": text, "confidence": confidence})
+            last_text = text
+
+        results.append({"index": index, "type": media_type, "results": item_results})
 
     (job_dir / "ocr.json").write_text(json.dumps(results, indent=2))
     return results

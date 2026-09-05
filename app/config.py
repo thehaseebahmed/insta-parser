@@ -44,6 +44,12 @@ SCENE_THRESHOLD = os.environ.get("SCENE_THRESHOLD", "0.3")
 # considered duplicates and dropped.
 OCR_DEDUPE_THRESHOLD = float(os.environ.get("OCR_DEDUPE_THRESHOLD", "90"))
 
+# Mean per-word Tesseract confidence (0-100) below which an OCR result is
+# treated as no text rather than surfaced as noise. Raise for fewer,
+# higher-confidence-only results; lower if legitimate low-contrast text is
+# being dropped.
+OCR_MIN_CONFIDENCE = float(os.environ.get("OCR_MIN_CONFIDENCE", "50"))
+
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
 # Optional place-metadata enrichment. Both are independent and optional: leave

@@ -34,6 +34,17 @@ class Place(BaseModel):
     maps_url: str | None = None
 
 
+class MediaItem(BaseModel):
+    """One item of a post's media manifest, as returned by /download — index
+    1 for a plain reel/photo, 1..N in carousel order for a sidecar post.
+    `path` is a real, current file location: per-step job files aren't
+    cleaned up until deleted or swept."""
+
+    index: int | None = None
+    type: str | None = None  # "video" or "image"
+    path: str | None = None
+
+
 class Metadata(BaseModel):
     shortcode: str | None = None
     username: str | None = None
@@ -42,19 +53,23 @@ class Metadata(BaseModel):
     like_count: int | None = None
     comment_count: int | None = None
     location: str | None = None
-    # Omitted from /process results when KEEP_FILES=false, since the file no
-    # longer exists by the time the caller sees the result.
-    video_path: str | None = None
 
 
 class DownloadResponse(BaseModel):
     job_id: str
     metadata: Metadata
+    media: list[MediaItem] = []
+
+
+class MediaAudio(BaseModel):
+    index: int | None = None
+    path: str | None = None
 
 
 class AudioResponse(BaseModel):
     job_id: str
-    audio_path: str
+    # One entry per video item; empty for an image-only post.
+    media: list[MediaAudio] = []
 
 
 class TranscriptSegment(BaseModel):
@@ -69,26 +84,44 @@ class Transcript(BaseModel):
     language: str | None = None
 
 
-class TranscribeResponse(Transcript):
+class MediaTranscript(Transcript):
+    index: int | None = None
+
+
+class TranscribeResponse(BaseModel):
     job_id: str
+    # One entry per video item; empty for an image-only post.
+    media: list[MediaTranscript] = []
+
+
+class MediaFrames(BaseModel):
+    index: int | None = None
+    type: str | None = None
+    frames: list[str] = []
 
 
 class FramesResponse(BaseModel):
     job_id: str
-    frames: list[str] = []
+    media: list[MediaFrames] = []
 
 
 class OcrResult(BaseModel):
     # Omitted from /process results when KEEP_FILES=false, same as
-    # Metadata.video_path.
+    # MediaItem.path.
     frame: str | None = None
     text: str | None = None
     confidence: float | None = None
 
 
+class MediaOcr(BaseModel):
+    index: int | None = None
+    type: str | None = None
+    results: list[OcrResult] = []
+
+
 class OcrResponse(BaseModel):
     job_id: str
-    results: list[OcrResult] = []
+    media: list[MediaOcr] = []
 
 
 class ProcessResponse(BaseModel):
@@ -96,10 +129,30 @@ class ProcessResponse(BaseModel):
     status: str
 
 
+class ProcessOcrResult(BaseModel):
+    """Same as OcrResult but without `frame` — /process deletes the job's
+    files by default, so a frame path in this response would either always
+    be null or a debug-only value; use the per-step /ocr endpoint instead if
+    you need frame paths."""
+
+    text: str | None = None
+    confidence: float | None = None
+
+
+class MediaResult(BaseModel):
+    """One media item's full result, as returned by /process — the join of
+    the download manifest, its transcript (video items only), and its OCR.
+    No `path`, for the same reason as ProcessOcrResult.frame above."""
+
+    index: int | None = None
+    type: str | None = None
+    transcript: Transcript | None = None
+    ocr: list[ProcessOcrResult] = []
+
+
 class ProcessResult(BaseModel):
     metadata: Metadata | None = None
-    transcript: Transcript | None = None
-    ocr_results: list[OcrResult] = []
+    media: list[MediaResult] = []
     places: list[Place] = []
 
 

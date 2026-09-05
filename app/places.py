@@ -22,7 +22,7 @@ logger = logging.getLogger("insta_parser")
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 _SYSTEM_PROMPT = (
-    "You extract real-world place mentions from Instagram reel content (caption, "
+    "You extract real-world place mentions from Instagram post content (caption, "
     "spoken transcript, on-screen text). Return a JSON array of distinct places "
     "worth visiting that are mentioned (restaurants, cafes, bars, landmarks, hotels, "
     "shops, or cities/regions the reel is about). Each item must be an object with "
@@ -45,10 +45,26 @@ def _build_context(metadata: dict, transcript: dict | None, ocr_results: list[di
     parts = [metadata.get("caption") or ""]
     if metadata.get("location"):
         parts.append(f"Tagged location: {metadata['location']}")
-    if transcript and transcript.get("text"):
-        parts.append(transcript["text"])
-    if ocr_results:
-        parts.extend(item["text"] for item in ocr_results if item.get("text"))
+
+    # A single-item post's context stays byte-identical to before this field
+    # existed (no "Item N" labels) so extraction behaviour doesn't shift for
+    # the common case; a carousel labels each item so the model can tell which
+    # slide text came from, though it isn't asked to attribute places back to one.
+    is_multi = len(metadata.get("media") or []) > 1
+
+    transcript_items = {item["index"]: item for item in (transcript or {}).get("media") or []}
+    ocr_items = {item["index"]: item for item in ocr_results or []}
+    indexes = sorted(set(transcript_items) | set(ocr_items))
+
+    for index in indexes:
+        label = f"Item {index} " if is_multi else ""
+        transcript_item = transcript_items.get(index)
+        if transcript_item and transcript_item.get("text"):
+            parts.append(f"{label}transcript: {transcript_item['text']}" if label else transcript_item["text"])
+        for ocr_entry in (ocr_items.get(index) or {}).get("results") or []:
+            if ocr_entry.get("text"):
+                parts.append(f"{label}on-screen text: {ocr_entry['text']}" if label else ocr_entry["text"])
+
     text = "\n".join(p for p in parts if p)
     return text[: config.PLACE_EXTRACTION_MAX_CHARS]
 
@@ -56,7 +72,7 @@ def _build_context(metadata: dict, transcript: dict | None, ocr_results: list[di
 def extract_place_mentions(
     metadata: dict, transcript: dict | None, ocr_results: list[dict] | None
 ) -> list[dict]:
-    """Ask the configured litellm model for place mentions in the reel's text.
+    """Ask the configured litellm model for place mentions in the post's text.
     Returns [] if extraction isn't configured, finds nothing, or the call
     fails — a broken/unreachable model shouldn't fail /process."""
     if not places_configured():

@@ -109,10 +109,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="insta-parser",
     description=(
-        "Turns an Instagram reel/post URL into text: metadata, a spoken-audio "
-        "transcript, and OCR of on-screen text, with optional place-metadata "
-        "enrichment. See the [README](https://github.com/thehaseebahmed/insta-parser) "
-        "for the CLI and agent skill docs."
+        "Turns an Instagram reel/post/carousel URL into text: metadata, a "
+        "spoken-audio transcript per video, and OCR of on-screen text per "
+        "image/video, with optional place-metadata enrichment. See the "
+        "[README](https://github.com/thehaseebahmed/insta-parser) for the CLI "
+        "and agent skill docs."
     ),
     version="0.1.0",
     lifespan=lifespan,
@@ -155,7 +156,8 @@ async def health():
 
 @app.post("/download", response_model=DownloadResponse, tags=["pipeline"])
 def download(req: UrlRequest):
-    """Fetch an Instagram post/reel and download its video. Synchronous."""
+    """Fetch an Instagram post/reel and download its media (video, image, or
+    carousel). Synchronous."""
     job_id = uuid.uuid4().hex
     job_dir = Path(config.WORK_DIR) / job_id
     logger.info("job=%s step=download url=%s", job_id, req.url)
@@ -166,25 +168,27 @@ def download(req: UrlRequest):
         if job_dir.exists():
             shutil.rmtree(job_dir, ignore_errors=True)
         raise _http_error(exc, fallback_status=502)
-    return {"job_id": job_id, "metadata": metadata}
+    return {"job_id": job_id, "metadata": metadata, "media": metadata["media"]}
 
 
 @app.post("/extract-audio", response_model=AudioResponse, tags=["pipeline"])
 def extract_audio(req: JobRequest):
-    """Extract mp3 audio from the job's downloaded video."""
+    """Extract mp3 audio from each video item in the job's post. Returns an
+    empty list for an image-only post — not an error."""
     job_dir = job_dir_for(req.job_id)
     logger.info("job=%s step=extract-audio", req.job_id)
     try:
-        audio_path = pipeline.extract_audio(job_dir)
+        media = pipeline.extract_audio(job_dir)
     except pipeline.PipelineError as exc:
         logger.error("job=%s step=extract-audio failed: %s", req.job_id, exc)
         raise _http_error(exc, fallback_status=422)
-    return {"job_id": req.job_id, "audio_path": str(audio_path)}
+    return {"job_id": req.job_id, "media": media}
 
 
 @app.post("/transcribe", response_model=TranscribeResponse, tags=["pipeline"])
 def transcribe(req: JobRequest):
-    """Transcribe the job's audio with faster-whisper."""
+    """Transcribe each video item's audio with faster-whisper. Returns an
+    empty list for an image-only post — not an error."""
     job_dir = job_dir_for(req.job_id)
     logger.info("job=%s step=transcribe", req.job_id)
     try:
@@ -197,28 +201,48 @@ def transcribe(req: JobRequest):
 
 @app.post("/extract-frames", response_model=FramesResponse, tags=["pipeline"])
 def extract_frames(req: JobRequest):
-    """Grab scene-change frames from the job's video as PNGs."""
+    """Grab OCR-ready frames for each media item: scene-change frames for a
+    video, one normalised frame for an image."""
     job_dir = job_dir_for(req.job_id)
     logger.info("job=%s step=extract-frames", req.job_id)
     try:
-        frames = pipeline.extract_frames(job_dir)
+        media = pipeline.extract_frames(job_dir)
     except pipeline.PipelineError as exc:
         logger.error("job=%s step=extract-frames failed: %s", req.job_id, exc)
         raise _http_error(exc, fallback_status=422)
-    return {"job_id": req.job_id, "frames": [str(f) for f in frames]}
+    return {"job_id": req.job_id, "media": media}
 
 
 @app.post("/ocr", response_model=OcrResponse, tags=["pipeline"])
 def ocr(req: JobRequest):
-    """OCR the job's extracted frames, deduping near-identical consecutive results."""
+    """OCR each media item's extracted frames, deduping near-identical
+    consecutive results within each item."""
     job_dir = job_dir_for(req.job_id)
     logger.info("job=%s step=ocr", req.job_id)
     try:
-        results = pipeline.run_ocr(job_dir)
+        media = pipeline.run_ocr(job_dir)
     except pipeline.PipelineError as exc:
         logger.error("job=%s step=ocr failed: %s", req.job_id, exc)
         raise _http_error(exc, fallback_status=422)
-    return {"job_id": req.job_id, "results": results}
+    return {"job_id": req.job_id, "media": media}
+
+
+def _merge_media_result(item: dict, transcripts_by_index: dict, ocr_by_index: dict) -> dict:
+    """Join one manifest item with its transcript (video items only) and its
+    OCR results, keyed by index. Built explicitly rather than spreading
+    `item` so no on-disk path leaks into the /process response — those files
+    are deleted by default, so a path here would either always be null or a
+    debug-only value; the per-step endpoints are the place for real paths."""
+    transcript_item = transcripts_by_index.get(item["index"])
+    transcript = None
+    if transcript_item is not None:
+        transcript = {k: v for k, v in transcript_item.items() if k != "index"}
+    ocr_item = ocr_by_index.get(item["index"])
+    ocr_entries = [
+        {"text": entry["text"], "confidence": entry["confidence"]}
+        for entry in (ocr_item["results"] if ocr_item else [])
+    ]
+    return {"index": item["index"], "type": item["type"], "transcript": transcript, "ocr": ocr_entries}
 
 
 def _run_pipeline(job_id: str, url: str) -> None:
@@ -243,18 +267,14 @@ def _run_pipeline(job_id: str, url: str) -> None:
         _set_job(job_id, step="places")
         places = pipeline.build_places(job_dir)
 
-        result = {
-            "metadata": metadata,
-            "transcript": transcript,
-            "ocr_results": ocr_results,
-            "places": places,
-        }
-        if not config.KEEP_FILES:
-            # The files are about to go away, so don't hand back paths to them.
-            result["metadata"] = {k: v for k, v in metadata.items() if k != "video_path"}
-            result["ocr_results"] = [
-                {k: v for k, v in item.items() if k != "frame"} for item in ocr_results
-            ]
+        transcripts_by_index = {item["index"]: item for item in transcript["media"]}
+        ocr_by_index = {item["index"]: item for item in ocr_results}
+        media = [
+            _merge_media_result(item, transcripts_by_index, ocr_by_index)
+            for item in metadata["media"]
+        ]
+
+        result = {"metadata": metadata, "media": media, "places": places}
         _set_job(job_id, status="done", step=None, result=result, error=None)
         logger.info("job=%s step=process completed", job_id)
     except pipeline.PipelineError as exc:

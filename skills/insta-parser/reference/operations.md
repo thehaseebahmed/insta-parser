@@ -172,10 +172,11 @@ Set in `docker-compose.yaml` under `environment:`, then `docker compose up -d`.
 | `TRANSCRIBE_CONCURRENCY` | `1` | Only raise with cores to spare |
 | `JOB_TTL_HOURS` | `24` | Lower if disk is tight |
 | `KEEP_FILES` | `false` | `true` only while debugging a specific job |
-| `MAX_FRAMES` | `60` | Raise for long reels, lower to speed up OCR |
+| `MAX_FRAMES` | `60` | Per video item (a carousel's images each always contribute 1 frame regardless). Raise for long videos, lower to speed up OCR |
 | `FRAME_SCALE_HEIGHT` | `720` | Raise if OCR misses small text, lower for speed |
 | `SCENE_THRESHOLD` | `0.3` | Raise for fewer frames, lower to catch subtler cuts |
 | `OCR_DEDUPE_THRESHOLD` | `90` | Lower to drop more near-duplicate text |
+| `OCR_MIN_CONFIDENCE` | `50` | Raise for fewer, higher-confidence-only results; lower if legitimate low-contrast text is being dropped |
 | `FFMPEG_TIMEOUT` | `300` | Raise only if long videos legitimately time out |
 | `WORK_DIR` | `/data` | Leave alone — must stay on the mounted volume |
 | `LOG_LEVEL` | `INFO` | `DEBUG` when diagnosing |
@@ -222,10 +223,25 @@ docker compose exec insta-parser ls /data/<job_id>/frames
 docker compose exec insta-parser cat /data/<job_id>/transcript.json
 ```
 
-Each step writes its output there (`video.mp4`, `audio.mp3`, `frames/`,
-`metadata.json`, `transcript.json`, `ocr.json`), so you can see exactly which
-stage produced bad data. **Set `KEEP_FILES` back to `false` afterwards** —
-left on, it grows the volume with every job.
+Each media item gets a `media_NN` file/folder, numbered in post order
+(`01`, `02`, ... — always 2 digits, even for a single-item post):
+
+```
+<job_id>/
+  metadata.json          # includes the media[] manifest: index, type, path
+  media_01.jpg           # or media_01.mp4, per item's type
+  media_02.mp4
+  audio/media_02.mp3     # one per video item only — no audio/ dir at all if none
+  frames/media_01/frame_0001.png    # image item: exactly one frame
+  frames/media_02/frame_0001.png    # video item: scene-change frames, capped at MAX_FRAMES
+  transcript.json        # {"media": [{"index": 2, "text": ..., "segments": [...], "language": ...}]}
+  ocr.json               # [{"index": 1, "type": "image", "results": [...]}, ...]
+  places.json
+```
+
+so you can see exactly which item and which stage produced bad data. **Set
+`KEEP_FILES` back to `false` afterwards** — left on, it grows the volume with
+every job.
 
 ## Security note
 
