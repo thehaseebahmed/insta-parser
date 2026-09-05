@@ -1,18 +1,17 @@
 """Pydantic request/response models for the HTTP API.
 
-These exist for two reasons: request validation (already true before this
-file existed) and generating an accurate OpenAPI schema so Swagger UI
-(`/docs`) and ReDoc (`/redoc`) show real response shapes instead of an empty
-schema.
+These are the response contract: FastAPI validates and serializes every
+endpoint's return dict against the matching model here, so a pipeline field
+that isn't declared on the model is silently dropped from the response, and
+an endpoint that returns an undeclared shape fails loudly. Adding a field to
+a pipeline result means adding it here too.
 
-Every response model uses `extra="allow"` and makes its fields optional:
-they document every field the API is known to return, but the goal is
-accurate documentation, not a strict contract — an endpoint's actual dict
-is never filtered or rejected just because a field here is missing or a
-field it returns isn't declared here.
+Fields are optional (`| None` / defaulted) because a partially-populated
+result — e.g. metadata Instagram rate-limited us out of — still needs to
+serialize rather than error.
 """
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 class UrlRequest(BaseModel):
@@ -28,7 +27,6 @@ class HealthResponse(BaseModel):
 
 
 class Place(BaseModel):
-    model_config = ConfigDict(extra="allow")
     name: str | None = None
     city: str | None = None
     country: str | None = None
@@ -37,7 +35,6 @@ class Place(BaseModel):
 
 
 class Metadata(BaseModel):
-    model_config = ConfigDict(extra="allow")
     shortcode: str | None = None
     username: str | None = None
     caption: str | None = None
@@ -48,8 +45,6 @@ class Metadata(BaseModel):
     # Omitted from /process results when KEEP_FILES=false, since the file no
     # longer exists by the time the caller sees the result.
     video_path: str | None = None
-    # Only present once /extract-places (or /process) has run.
-    places: list[Place] | None = None
 
 
 class DownloadResponse(BaseModel):
@@ -63,14 +58,12 @@ class AudioResponse(BaseModel):
 
 
 class TranscriptSegment(BaseModel):
-    model_config = ConfigDict(extra="allow")
     start: float | None = None
     end: float | None = None
     text: str | None = None
 
 
 class Transcript(BaseModel):
-    model_config = ConfigDict(extra="allow")
     text: str | None = None
     segments: list[TranscriptSegment] = []
     language: str | None = None
@@ -86,7 +79,6 @@ class FramesResponse(BaseModel):
 
 
 class OcrResult(BaseModel):
-    model_config = ConfigDict(extra="allow")
     # Omitted from /process results when KEEP_FILES=false, same as
     # Metadata.video_path.
     frame: str | None = None
@@ -99,25 +91,19 @@ class OcrResponse(BaseModel):
     results: list[OcrResult] = []
 
 
-class PlacesResponse(BaseModel):
-    job_id: str
-    places: list[Place] = []
-
-
 class ProcessResponse(BaseModel):
     job_id: str
     status: str
 
 
 class ProcessResult(BaseModel):
-    model_config = ConfigDict(extra="allow")
     metadata: Metadata | None = None
     transcript: Transcript | None = None
     ocr_results: list[OcrResult] = []
+    places: list[Place] = []
 
 
 class JobStatus(BaseModel):
-    model_config = ConfigDict(extra="allow")
     job_id: str
     status: str
     step: str | None = None

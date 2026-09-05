@@ -23,8 +23,7 @@ installation from GitHub Packages.
 | `POST` | `/transcribe` | Transcribe the audio with faster-whisper |
 | `POST` | `/extract-frames` | Grab scene-change frames as PNGs |
 | `POST` | `/ocr` | OCR the extracted frames, deduping near-identical results |
-| `POST` | `/extract-places` | Extract place mentions and resolve them via Google Maps (optional, see below) |
-| `POST` | `/process` | **Async.** Queues the full pipeline, returns `202` + a `job_id` |
+| `POST` | `/process` | **Async.** Queues the full pipeline, returns `202` + a `job_id`. Includes place-metadata enrichment (optional, see below) |
 | `GET` | `/jobs/{job_id}` | Status/result of a `/process` run |
 | `DELETE` | `/jobs/{job_id}` | Delete a job's files |
 
@@ -165,10 +164,10 @@ curl -sX POST $BASE/process \
 # Poll until status is "done" (or "error")
 curl -s $BASE/jobs/3f1c...
 # => {"job_id":"3f1c...","status":"running","step":"transcribe","result":null,"error":null}
-# => {"job_id":"3f1c...","status":"done","step":null,"result":{"metadata":{"username":"...",
+# => {"job_id":"3f1c...","status":"done","step":null,"result":{"metadata":{"username":"...", ...},
+#     "transcript":{"text":"...","segments":[...]},"ocr_results":[...],
 #     "places":[{"name":"Joe's Pizza","city":"Rome","country":"Italy","rating":4.6,
-#                "maps_url":"https://maps.google.com/?cid=..."}], ...},
-#     "transcript":{"text":"...","segments":[...]},"ocr_results":[...]},"error":null}
+#                "maps_url":"https://maps.google.com/?cid=..."}]},"error":null}
 ```
 
 In n8n: an HTTP Request node for `POST /process`, then a Wait node, then an
@@ -211,12 +210,15 @@ curl -sX DELETE $BASE/jobs/$JOB_ID
 # => {"job_id": "...", "status": "deleted"}
 ```
 
+Place-metadata enrichment (below) only runs as part of `/process` — there's no
+per-step endpoint for it.
+
 ## Place-metadata enrichment (optional)
 
-If configured, `/process` (and the standalone `/extract-places` step) pull
-place mentions — restaurants, landmarks, cities — out of the reel's caption,
-tagged location, transcript, and OCR text, and attach them as
-`metadata.places`: an array of `{name, city, country, rating, maps_url}`.
+If configured, `/process` pulls place mentions — restaurants, landmarks,
+cities — out of the reel's caption, tagged location, transcript, and OCR
+text, and attaches them as `result.places`: an array of
+`{name, city, country, rating, maps_url}`.
 
 This is two independent, optional pieces:
 
@@ -230,11 +232,14 @@ This is two independent, optional pieces:
    that API enabled on its Google Cloud project — each lookup is a billable
    request.
 
-Leave either unset and that piece is simply omitted: no `LITELLM_MODEL` means
-`places` extraction doesn't run at all (no `places` key added); no
+Leave either unset and that piece is simply skipped: no `LITELLM_MODEL` means
+extraction doesn't run at all and `places` comes back `[]`; no
 `GOOGLE_MAPS_API_KEY` means extracted places still come back but with
 `rating`/`maps_url` set to `null`. A failed litellm or Maps call is logged and
-treated the same as unconfigured — it never fails `/process`.
+treated the same as unconfigured — it never fails `/process`. Since `[]` means
+both "not configured" and "configured, found nothing", don't treat an empty
+`places` as proof the reel has none — see the `insta-parser-api` skill for how
+to read it.
 
 ## Notes
 
