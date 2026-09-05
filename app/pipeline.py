@@ -228,7 +228,15 @@ def transcribe(job_dir: Path) -> dict:
     model = _get_whisper_model()
     try:
         with _transcribe_semaphore:
-            segments_gen, info = model.transcribe(str(audio_path))
+            segments_gen, info = model.transcribe(
+                str(audio_path),
+                vad_filter=config.WHISPER_VAD_FILTER,
+                # Disabled regardless of VAD: once a window hallucinates, conditioning
+                # on its (bad) text can drag subsequent windows into a repetition
+                # loop. Short reels don't need cross-window consistency badly enough
+                # to be worth that risk.
+                condition_on_previous_text=False,
+            )
             # transcribe() returns a lazy generator; it must be drained inside
             # the semaphore or the real work happens after we release it.
             segments = [

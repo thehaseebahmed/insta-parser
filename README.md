@@ -48,6 +48,7 @@ OpenAPI schema at `/openapi.json`.
 | `WHISPER_MODEL` | `base` | faster-whisper model size (`tiny`, `base`, `small`, ...) |
 | `WHISPER_DEVICE` | `cpu` | faster-whisper device |
 | `WHISPER_COMPUTE_TYPE` | `int8` | faster-whisper compute type |
+| `WHISPER_VAD_FILTER` | `true` | Skip non-speech audio (silence, music, ASMR mouth sounds) via Silero VAD before decoding, to avoid whisper hallucinating text on those stretches |
 | `TRANSCRIBE_CONCURRENCY` | `1` | How many transcriptions may run at once |
 | `FFMPEG_TIMEOUT` | `300` | Per-invocation ffmpeg timeout, seconds |
 | `MAX_FRAMES` | `60` | Cap on extracted frames per video |

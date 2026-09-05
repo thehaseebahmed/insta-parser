@@ -170,6 +170,36 @@ class TestTranscribe:
             with pytest.raises(pipeline.PipelineError, match="Transcription failed"):
                 pipeline.transcribe(tmp_path)
 
+    def test_passes_vad_filter_and_disables_condition_on_previous_text(self, tmp_path):
+        # Regression test for hallucinated garbage transcripts on silent/ASMR
+        # audio: VAD should skip non-speech stretches instead of decoding them,
+        # and condition_on_previous_text=False keeps one bad window from
+        # dragging the rest into a repetition loop.
+        (tmp_path / "audio.mp3").touch()
+        fake_model = MagicMock()
+        fake_model.transcribe.return_value = ([], MagicMock(language="en"))
+        with patch("app.pipeline._get_whisper_model", return_value=fake_model), patch.object(
+            pipeline.config, "WHISPER_VAD_FILTER", True
+        ):
+            pipeline.transcribe(tmp_path)
+
+        fake_model.transcribe.assert_called_once_with(
+            str(tmp_path / "audio.mp3"),
+            vad_filter=True,
+            condition_on_previous_text=False,
+        )
+
+    def test_vad_filter_reflects_config_toggle(self, tmp_path):
+        (tmp_path / "audio.mp3").touch()
+        fake_model = MagicMock()
+        fake_model.transcribe.return_value = ([], MagicMock(language="en"))
+        with patch("app.pipeline._get_whisper_model", return_value=fake_model), patch.object(
+            pipeline.config, "WHISPER_VAD_FILTER", False
+        ):
+            pipeline.transcribe(tmp_path)
+
+        assert fake_model.transcribe.call_args.kwargs["vad_filter"] is False
+
 
 class FakePost:
     """Stands in for instaloader.Post: is_video/caption/likes/comments are
