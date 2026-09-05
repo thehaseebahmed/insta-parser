@@ -1,0 +1,20 @@
+{
+  "name": "@thehaseebahmed/insta-parser-cli",
+  "version": "0.1.0",
+  "description": "Minimal CLI for driving the self-hosted insta-parser API from scripts and agents.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thehaseebahmed/insta-parser.git",
+    "directory": "cli"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "bin": {
+    "insta-parser": "./bin/insta-parser.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
