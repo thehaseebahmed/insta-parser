@@ -104,13 +104,14 @@ def test_ocr_success(client, tmp_path):
     assert results[0]["confidence"] == 90.0
 
 
-def test_extract_places_success(client, tmp_path):
+def test_extract_places_endpoint_is_removed(client, tmp_path):
+    # Regression test: /extract-places was folded into /process's result
+    # (result.places) since places are derived from data the pipeline
+    # already produces, not something worth a separate call/endpoint.
     job_id = _job_id("f")
     (tmp_path / job_id).mkdir()
-    with patch.object(pipeline, "build_places", return_value=[]):
-        resp = client.post("/extract-places", json={"job_id": job_id})
-    assert resp.status_code == 200
-    assert resp.json()["places"] == []
+    resp = client.post("/extract-places", json={"job_id": job_id})
+    assert resp.status_code == 404
 
 
 def test_delete_job_removes_dir_and_registry_entry(client, tmp_path):
@@ -143,6 +144,8 @@ def test_process_runs_the_pipeline_in_the_background_and_completes(client):
     # Starlette BackgroundTask. This exercises that path end to end.
     fake_metadata = {"shortcode": "ABC", "username": "u", "caption": "c", "video_path": "/x/video.mp4"}
     fake_transcript = {"text": "hi", "segments": [], "language": "en"}
+    fake_places = [{"name": "Joe's Pizza", "city": "Rome", "country": "Italy",
+                    "rating": 4.6, "maps_url": "https://maps.google.com/?cid=1"}]
 
     with patch.object(pipeline, "download_post", return_value=dict(fake_metadata)), patch.object(
         pipeline, "extract_audio", return_value=None
@@ -151,7 +154,7 @@ def test_process_runs_the_pipeline_in_the_background_and_completes(client):
     ), patch.object(
         pipeline, "run_ocr", return_value=[]
     ), patch.object(
-        pipeline, "build_places", return_value=[]
+        pipeline, "build_places", return_value=fake_places
     ):
         resp = client.post("/process", json={"url": "https://www.instagram.com/reel/ABC/"})
         assert resp.status_code == 202
@@ -167,6 +170,10 @@ def test_process_runs_the_pipeline_in_the_background_and_completes(client):
     # from the underlying result; the response model still declares the key,
     # so it comes back null rather than being absent.
     assert job["result"]["metadata"]["video_path"] is None
+    # places is a sibling of metadata/transcript/ocr_results, not nested
+    # under metadata.
+    assert job["result"]["places"] == fake_places
+    assert "places" not in job["result"]["metadata"]
 
 
 def test_process_pipeline_error_marks_the_job_as_error(client):
@@ -219,6 +226,27 @@ def test_openapi_schema_documents_response_shapes(client):
 
     process_schema = schema["paths"]["/process"]["post"]["responses"]["202"]["content"]["application/json"]["schema"]
     assert process_schema == {"$ref": "#/components/schemas/ProcessResponse"}
+
+    job_schema = schema["components"]["schemas"]["JobStatus"]["properties"]
+    assert "job_id" in job_schema
+    assert "updated_at" in job_schema
+
+
+def test_no_response_schema_advertises_additional_properties(client):
+    # Regression test: response models used to set extra="allow", which
+    # pydantic renders as additionalProperties: true and Swagger UI then
+    # fills in with a placeholder "additionalProp1" key in the example.
+    # Response models are now the real contract, so no schema should do this.
+    schema = client.get("/openapi.json").json()
+    for name, model_schema in schema["components"]["schemas"].items():
+        assert model_schema.get("additionalProperties") is not True, (
+            f"{name} still advertises additionalProperties"
+        )
+
+
+def test_extract_places_route_is_gone(client):
+    schema = client.get("/openapi.json").json()
+    assert "/extract-places" not in schema["paths"]
 
     job_schema = schema["components"]["schemas"]["JobStatus"]["properties"]
     assert "job_id" in job_schema

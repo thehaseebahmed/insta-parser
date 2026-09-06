@@ -177,13 +177,14 @@ Set in `docker-compose.yaml` under `environment:`, then `docker compose up -d`.
 | `LITELLM_BASE_URL` / `LITELLM_MODEL` | unset | Set both to enable place extraction via the self-hosted litellm proxy |
 | `GOOGLE_MAPS_API_KEY` | unset | Set to resolve extracted places to a rating + Maps URL |
 
-## Place-metadata enrichment (`metadata.places`) failing or missing
+## Place-metadata enrichment (`result.places`) failing or missing
 
-This is optional, best-effort enrichment layered on top of the core pipeline
-— it never fails `/process` itself, so "places is missing/empty" is a config
-or reachability question, not a crash to chase in the main logs.
+This is optional, best-effort enrichment layered on top of the core pipeline,
+only produced by `/process` (there's no per-step endpoint for it) — it never
+fails `/process` itself, so "places is empty" is a config or reachability
+question, not a crash to chase in the main logs.
 
-- **`places` key never appears at all** — `LITELLM_BASE_URL` and/or
+- **`places` always comes back `[]`** — `LITELLM_BASE_URL` and/or
   `LITELLM_MODEL` aren't set. Check `docker compose config` for both.
 - **`places` appears but `rating`/`maps_url` are always `null`** —
   `GOOGLE_MAPS_API_KEY` isn't set, or the "Places API (New)" isn't enabled on

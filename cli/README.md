@@ -94,13 +94,13 @@ export INSTA_PARSER_URL=http://172.17.0.1:8420
 job_id=$(insta-parser job start "$1" | jq -r .job_id)
 insta-parser job wait "$job_id" > result.json
 insta-parser job delete "$job_id" > /dev/null
-jq '.result.metadata.places' result.json
+jq '.result.places' result.json
 ```
 
 ## What this doesn't cover
 
 Only the `/process` + `/jobs/{job_id}` path is wrapped — that's the
 documented "normal case" in the API skill. The per-step endpoints
-(`/download`, `/extract-audio`, `/transcribe`, `/extract-frames`, `/ocr`,
-`/extract-places`) aren't exposed here; use `curl` directly for those (see
+(`/download`, `/extract-audio`, `/transcribe`, `/extract-frames`, `/ocr`)
+aren't exposed here; use `curl` directly for those (see
 the main [README](../README.md#step-by-step-synchronous)).

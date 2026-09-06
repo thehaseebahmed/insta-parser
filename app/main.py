@@ -20,7 +20,6 @@ from .schemas import (
     JobRequest,
     JobStatus,
     OcrResponse,
-    PlacesResponse,
     ProcessResponse,
     TranscribeResponse,
     UrlRequest,
@@ -222,22 +221,6 @@ def ocr(req: JobRequest):
     return {"job_id": req.job_id, "results": results}
 
 
-@app.post("/extract-places", response_model=PlacesResponse, tags=["pipeline"])
-def extract_places(req: JobRequest):
-    """Extract place mentions from the job's caption/transcript/OCR text (via
-    litellm) and resolve each against the Google Maps Places API. Requires
-    /download to have run; /transcribe and /ocr are used if they've run but
-    are not required. Returns [] if extraction/Maps aren't configured."""
-    job_dir = job_dir_for(req.job_id)
-    logger.info("job=%s step=extract-places", req.job_id)
-    try:
-        places = pipeline.build_places(job_dir)
-    except pipeline.PipelineError as exc:
-        logger.error("job=%s step=extract-places failed: %s", req.job_id, exc)
-        raise _http_error(exc, fallback_status=422)
-    return {"job_id": req.job_id, "places": places}
-
-
 def _run_pipeline(job_id: str, url: str) -> None:
     """The full pipeline, run in the background so /process can return at once."""
     job_dir = Path(config.WORK_DIR) / job_id
@@ -257,10 +240,15 @@ def _run_pipeline(job_id: str, url: str) -> None:
         _set_job(job_id, step="ocr")
         ocr_results = pipeline.run_ocr(job_dir)
 
-        _set_job(job_id, step="extract-places")
-        metadata["places"] = pipeline.build_places(job_dir)
+        _set_job(job_id, step="places")
+        places = pipeline.build_places(job_dir)
 
-        result = {"metadata": metadata, "transcript": transcript, "ocr_results": ocr_results}
+        result = {
+            "metadata": metadata,
+            "transcript": transcript,
+            "ocr_results": ocr_results,
+            "places": places,
+        }
         if not config.KEEP_FILES:
             # The files are about to go away, so don't hand back paths to them.
             result["metadata"] = {k: v for k, v in metadata.items() if k != "video_path"}
