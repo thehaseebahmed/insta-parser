@@ -92,6 +92,15 @@ Then `docker compose up -d`. Sizes: `tiny` < `base` < `small` < `medium`.
 Only one transcription runs at a time (`TRANSCRIBE_CONCURRENCY`); raising it
 on a CPU-only box usually makes everything slower, not faster.
 
+### Transcript is short garbage on a silent/music/ASMR reel
+
+Whisper hallucinating on non-speech audio (e.g. a repeated number/word
+fragment as the entire transcript). `WHISPER_VAD_FILTER` (default `true`)
+skips non-speech stretches before decoding specifically to prevent this —
+check it hasn't been set to `false`. A reel that's genuinely just music or
+silence should now come back with an empty `transcript.text`, which is a
+normal result, not a bug.
+
 ### First request after a rebuild is slow
 
 The whisper model downloads on first use. It is cached on the data volume
@@ -164,6 +173,7 @@ Set in `docker-compose.yaml` under `environment:`, then `docker compose up -d`.
 | `WHISPER_MODEL` | `base` | `tiny` for speed, `small`/`medium` for accuracy |
 | `WHISPER_DEVICE` | `cpu` | `cuda` only with a GPU passed into the container |
 | `WHISPER_COMPUTE_TYPE` | `int8` | `float16` on GPU; `int8` is right for CPU |
+| `WHISPER_VAD_FILTER` | `true` | Skips non-speech audio before decoding; only turn off if VAD is clipping real speech |
 | `TRANSCRIBE_CONCURRENCY` | `1` | Only raise with cores to spare |
 | `JOB_TTL_HOURS` | `24` | Lower if disk is tight |
 | `KEEP_FILES` | `false` | `true` only while debugging a specific job |

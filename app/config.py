@@ -21,6 +21,11 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
 
+# Skip non-speech audio (silence, music-only, ASMR mouth sounds) via faster-whisper's
+# bundled Silero VAD pass before decoding, instead of feeding it to whisper and risking
+# hallucinated text on those stretches. Set to "false" to restore pre-VAD behavior.
+WHISPER_VAD_FILTER = os.environ.get("WHISPER_VAD_FILTER", "true").lower() == "true"
+
 # How many transcriptions may run at once. Whisper is CPU-hungry, so letting several
 # run in parallel on a homelab box makes them all slower. Queue them instead.
 # Clamped to at least 1 — a Semaphore(0) would block every transcription forever.

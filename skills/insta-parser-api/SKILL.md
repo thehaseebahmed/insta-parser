@@ -139,8 +139,12 @@ it.) `/process` cleans up after itself automatically.
   API failed to return it (rare, but the video/transcript/OCR are unaffected).
 - **`caption`** is the poster's own text. Often the single most informative
   field — check it before assuming you need the transcript.
-- **`transcript.text`** is the spoken audio. Empty or gibberish means the reel
-  had music only, or no speech. That is a normal result, not a failure.
+- **`transcript.text`** is the spoken audio. Empty means the reel had music
+  only, ASMR-style non-speech sound, or no speech — that is a normal result,
+  not a failure. The service filters non-speech audio before transcribing
+  specifically to avoid returning hallucinated gibberish on those reels; if
+  you do see garbled/repetitive text, treat it as an unreliable transcript
+  rather than real spoken content.
 - **`ocr_results`** is on-screen text, one entry per retained frame, already
   deduplicated across near-identical consecutive frames. `confidence` is a
   mean per-word Tesseract score (0–100); treat anything below ~60 as

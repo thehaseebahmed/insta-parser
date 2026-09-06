@@ -24,6 +24,7 @@ services:
             # LITELLM_MODEL: "your-model-alias"
             # GOOGLE_MAPS_API_KEY: "..."
             # Tuning knobs, defaults shown:
+            # WHISPER_VAD_FILTER: "true"
             # TRANSCRIBE_CONCURRENCY: "1"
             # FFMPEG_TIMEOUT: "300"
             # MAX_FRAMES: "60"
