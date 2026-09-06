@@ -36,15 +36,35 @@ class TestConfigured:
 
 
 class TestBuildContext:
-    def test_combines_caption_location_transcript_and_ocr(self):
-        metadata = {"caption": "Cap", "location": "Rome"}
-        transcript = {"text": "Spoken text"}
-        ocr_results = [{"text": "On screen"}, {"text": ""}]
+    def test_combines_caption_location_transcript_and_ocr_for_a_single_item_post(self):
+        # A single-item post's context has no "Item N" labels, so extraction
+        # behaviour for the common (non-carousel) case is unaffected by the
+        # media-aware rewrite.
+        metadata = {"caption": "Cap", "location": "Rome", "media": [{"index": 1, "type": "video"}]}
+        transcript = {"media": [{"index": 1, "text": "Spoken text"}]}
+        ocr_results = [{"index": 1, "type": "video", "results": [{"text": "On screen"}, {"text": ""}]}]
         context = places._build_context(metadata, transcript, ocr_results)
         assert "Cap" in context
         assert "Tagged location: Rome" in context
         assert "Spoken text" in context
         assert "On screen" in context
+        assert "Item" not in context
+
+    def test_labels_and_orders_carousel_items(self):
+        metadata = {
+            "caption": "Cap",
+            "media": [{"index": 1, "type": "image"}, {"index": 2, "type": "video"}],
+        }
+        transcript = {"media": [{"index": 2, "text": "Spoken text"}]}
+        ocr_results = [
+            {"index": 1, "type": "image", "results": [{"text": "Slide one text"}]},
+            {"index": 2, "type": "video", "results": [{"text": "Slide two text"}]},
+        ]
+        context = places._build_context(metadata, transcript, ocr_results)
+        assert context.index("Item 1") < context.index("Item 2 transcript")
+        assert "Item 1 on-screen text: Slide one text" in context
+        assert "Item 2 transcript: Spoken text" in context
+        assert "Item 2 on-screen text: Slide two text" in context
 
     def test_skips_missing_pieces(self):
         context = places._build_context({"caption": "Only caption"}, None, None)

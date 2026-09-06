@@ -1,14 +1,16 @@
 ---
 name: insta-parser
-description: Call, diagnose, and operate the self-hosted insta-parser HTTP service that turns an Instagram reel/post URL into text (caption, spoken transcript, on-screen text) and optional place enrichment. Use when asked to summarize, read, transcribe, search, or pull the contents out of an Instagram reel/post URL, when a workflow needs a reel's text as input, or when insta-parser returns errors, hangs, or needs configuration changed.
+description: Call, diagnose, and operate the self-hosted insta-parser HTTP service that turns an Instagram reel/post/carousel URL into text (caption, per-item spoken transcript, per-item on-screen text) and optional place enrichment. Use when asked to summarize, read, transcribe, search, or pull the contents out of an Instagram reel/post/carousel URL, when a workflow needs a post's text as input, or when insta-parser returns errors, hangs, or needs configuration changed.
 ---
 
 # Using insta-parser
 
 `insta-parser` is a small self-hosted HTTP service that turns an Instagram
-reel/post URL into text: post metadata, a spoken-audio transcript, and OCR of
-on-screen text. It is plain JSON over HTTP with no authentication and no SDK
-and no CLI — call it directly with `curl` (or any HTTP client).
+reel/post/carousel URL into text: post metadata, a spoken-audio transcript for
+each video, and OCR of on-screen text for each image/video — attributed to
+which item of the post it came from. It is plain JSON over HTTP with no
+authentication and no SDK and no CLI — call it directly with `curl` (or any
+HTTP client).
 
 ## Reaching the service
 
@@ -84,9 +86,14 @@ curl -s http://localhost:8420/jobs/3f1c9a2b...
     "metadata": { "shortcode": "ABC123xyz", "username": "some_account", "caption": "...",
                   "timestamp": "2026-01-02T03:04:05", "like_count": 1234,
                   "comment_count": 56, "location": "Amsterdam" },
-    "transcript": { "text": "full transcript ...", "language": "en",
-                    "segments": [ { "start": 0.0, "end": 1.5, "text": "..." } ] },
-    "ocr_results": [ { "text": "ON SCREEN TEXT", "confidence": 92.4 } ],
+    "media": [
+      {
+        "index": 1, "type": "video",
+        "transcript": { "text": "full transcript ...", "language": "en",
+                        "segments": [ { "start": 0.0, "end": 1.5, "text": "..." } ] },
+        "ocr": [ { "text": "ON SCREEN TEXT", "confidence": 92.4 } ]
+      }
+    ],
     "places": [ { "name": "Joe's Pizza", "city": "Rome", "country": "Italy",
                   "rating": 4.6, "maps_url": "https://maps.google.com/?cid=..." } ]
   },
@@ -95,15 +102,29 @@ curl -s http://localhost:8420/jobs/3f1c9a2b...
 }
 ```
 
+A **carousel** (multiple images/videos in one post) returns one entry in
+`result.media` per slide, in carousel order, each with its own `index`,
+`type` (`"image"` or `"video"`), `transcript` (`null` for an image slide),
+and `ocr`. `/process` never includes on-disk file paths (`metadata` has no
+`media` list, and `media` entries have no `path`/`frame`) — those files are
+deleted once the job completes, so a path here would be dead weight; use the
+per-step endpoints below if you need a real path to a file that's still on
+disk.
+
 `updated_at` is a Unix timestamp of the last state change. If it stops
 advancing while `status` is still `running`, the job is stuck on that step —
 useful for deciding to give up rather than polling indefinitely.
 
 **Polling guidance.** Transcription dominates the runtime. A short reel is
-usually done in well under a minute, a long one can take several. Poll every
-**5–10 seconds** and give up after ~10 minutes. While running, `step` tells
-you where it is: `download` → `extract-audio` → `transcribe` →
-`extract-frames` → `ocr` → `places`. Do not poll in a tight loop.
+usually done in well under a minute, a long one can take several; a carousel
+scales roughly with how many video items it has. Poll every **5–10 seconds**
+and give up after ~10 minutes. While running, `step` tells you where it is:
+`download` → `extract-audio` → `transcribe` → `extract-frames` → `ocr` →
+`places`. Do not poll in a tight loop.
+
+`extract-audio` and `transcribe` still run (and report as the current `step`)
+for an image-only post — they just do nothing, since there are no video items
+to process. That's not a stall; it finishes immediately and moves on.
 
 `status` values: `queued`, `running`, `done`, `error`, and `files-only` (a
 folder exists from per-step calls but no `/process` run is tracking it).
@@ -139,12 +160,15 @@ All take `{"job_id": "..."}` except `/download`, which starts the job.
 
 | Call | Returns |
 |---|---|
-| `POST /download` `{"url": "..."}` | `{job_id, metadata}` — metadata includes `video_path` |
-| `POST /extract-audio` | `{job_id, audio_path}` |
-| `POST /transcribe` | `{job_id, text, segments, language}` |
-| `POST /extract-frames` | `{job_id, frames: [path, ...]}` |
-| `POST /ocr` | `{job_id, results: [{frame, text, confidence}]}` |
+| `POST /download` `{"url": "..."}` | `{job_id, metadata, media: [{index, type, path}, ...]}` — `media` is the manifest, in post order |
+| `POST /extract-audio` | `{job_id, media: [{index, path}, ...]}` — one entry per video item, `[]` for an image-only post |
+| `POST /transcribe` | `{job_id, media: [{index, text, segments, language}, ...]}` — one entry per video item, `[]` for an image-only post |
+| `POST /extract-frames` | `{job_id, media: [{index, type, frames: [path, ...]}, ...]}` — one entry per media item |
+| `POST /ocr` | `{job_id, media: [{index, type, results: [{frame, text, confidence}, ...]}, ...]}` |
 | `DELETE /jobs/{job_id}` | `{job_id, status: "deleted"}` |
+
+Every list here is keyed by the same `index` from `/download`'s manifest, in
+carousel order (1 for a plain reel/photo, 1..N for a carousel).
 
 These are synchronous — each returns its result directly. Place-metadata
 enrichment (below) only runs as part of `/process` — there's no per-step
@@ -157,39 +181,52 @@ it.) `/process` cleans up after itself automatically.
 
 ## Interpreting the output
 
-- **`username`** is the reel's owner. Falls back to `"Unknown"` if Instagram's
-  API failed to return it (rare, but the video/transcript/OCR are unaffected).
-- **`caption`** is the poster's own text. Often the single most informative
-  field — check it before assuming you need the transcript.
-- **`transcript.text`** is the spoken audio. Empty means the reel had music
-  only, ASMR-style non-speech sound, or no speech — that is a normal result,
-  not a failure. The service filters non-speech audio before transcribing
-  specifically to avoid returning hallucinated gibberish on those reels; if
-  you do see garbled/repetitive text, treat it as an unreliable transcript
+- **`username`** is the post's owner. Falls back to `"Unknown"` if Instagram's
+  API failed to return it (rare, but the media/transcript/OCR are unaffected).
+- **`caption`** is the poster's own text, shared by every item in a carousel.
+  Often the single most informative field — check it before assuming you need
+  the transcript.
+- **`result.media`** is a list with one entry per post item, in carousel
+  order (a plain reel or single photo still has exactly one entry). Each
+  entry has `index`, `type` (`"video"` or `"image"`), `transcript`, and `ocr`.
+- **`transcript`** is `null` for an image item — there's no audio to
+  transcribe. For a video item, `transcript.text` is the spoken audio; empty
+  means that video had music only, ASMR-style non-speech sound, or no speech
+  — a normal result, not a failure. The service filters non-speech audio
+  before transcribing specifically to avoid returning hallucinated gibberish;
+  if you do see garbled/repetitive text, treat it as an unreliable transcript
   rather than real spoken content.
-- **`ocr_results`** is on-screen text, one entry per retained frame, already
-  deduplicated across near-identical consecutive frames. `confidence` is a
-  mean per-word Tesseract score (0–100); treat anything below ~60 as
-  unreliable. Expect OCR noise from stylized fonts and busy backgrounds — do
-  not present raw OCR as a verbatim quote.
-- Reels often carry the same information in caption, speech, *and* on-screen
-  text. When summarizing, reconcile the three rather than concatenating them.
-- With default settings `/process` omits `video_path` and per-frame paths,
-  because those files are deleted once the job completes.
+- **`ocr`** is on-screen text for that one item, one entry per retained
+  frame, already deduplicated across near-identical *consecutive* frames
+  within that item (identical text repeated on a *different* carousel slide
+  is not deduplicated — it's kept and attributed to that slide). `confidence`
+  is a mean per-word Tesseract score (0–100) *after* a result below
+  `OCR_MIN_CONFIDENCE` (default 50) has already been dropped as noise — so
+  everything you see cleared that floor, but still expect some OCR mangling
+  from stylized fonts and busy backgrounds; do not present raw OCR as a
+  verbatim quote.
+- A post often carries the same information in caption, speech, *and*
+  on-screen text — and a carousel often repeats it across slides. When
+  summarizing, reconcile all of it by meaning rather than concatenating it,
+  and attribute slide-specific claims (e.g. "step 3" on-screen text) to their
+  `index` if the caller cares which slide something came from.
+- `/process` never returns on-disk paths (see the note above) — that's true
+  regardless of `KEEP_FILES`, since the response contract just doesn't
+  declare those fields there.
 - **`result.places`** is optional enrichment (a local model extracts place
   mentions, then Google Maps resolves them) — see
   [`reference/operations.md`](reference/operations.md) for how it's
   configured. It is always a list; if the service isn't configured for it,
   `places` comes back `[]`, not absent. If Maps resolution isn't configured
   but extraction is, entries still appear with `rating`/`maps_url` as `null`.
-  Don't treat an empty `places` as proof the reel has none — `[]` means "not
+  Don't treat an empty `places` as proof the post has none — `[]` means "not
   verified" as much as it means "none found."
 
 ## Errors
 
 | Code | Meaning | What to do |
 |---|---|---|
-| `400` | Bad input — URL isn't an Instagram post/reel, malformed `job_id`, or the post has no video | Fix the input. Don't retry as-is. |
+| `400` | Bad input — URL isn't an Instagram post/reel, or malformed `job_id` | Fix the input. Don't retry as-is. |
 | `404` | Unknown `job_id` | The job expired, was deleted, or the service restarted. Start over. |
 | `422` | Step called out of order, or ffmpeg/tesseract failed | Run the prerequisite step. |
 | `502` | Instagram fetch failed — rate-limited, private, or removed post | See [`reference/operations.md`](reference/operations.md). |
@@ -209,11 +246,13 @@ configured (`IG_USERNAME` / `IG_SESSION_FILE`) rather than continuing to retry.
 
 - Only **public** posts work unless the service is configured with a logged-in
   session. Private accounts return `502`.
-- Only **video** posts (reels, video posts). A photo-only post returns `400`.
+- **All post shapes work**: a single video (reel), a single image, and a
+  carousel of any mix of images and videos.
 - One transcription runs at a time by default; concurrent requests queue rather
-  than fail. Submitting many reels at once is safe but not faster.
-- Frames are capped (default 60) and downscaled before OCR, so a very long
-  reel's later scene changes may not be represented.
+  than fail. Submitting many posts at once is safe but not faster.
+- Frames are capped (default 60) **per video item**, downscaled before OCR, so
+  a very long video's later scene changes may not be represented. Each image
+  item always contributes exactly one frame.
 
 ## Operating the service
 

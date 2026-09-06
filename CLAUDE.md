@@ -27,12 +27,17 @@ validates input, calls those functions, and maps exceptions to status codes. The
 than going through HTTP. Put logic in `pipeline.py`, not in an endpoint.
 
 **Steps hand off through files, not return values.** Each job is
-`WORK_DIR/<32-hex job_id>/` containing `video.mp4`, `metadata.json`, `audio.mp3`,
-`frames/frame_%04d.png`, `transcript.json`, `ocr.json`, `places.json`. A step reads
-what its predecessor wrote and raises `PipelineError("... call /download first")` if
-it's missing. This is what makes the per-step endpoints independently callable and
-re-runnable. A new step should follow the same pattern: read inputs from `job_dir`,
-write its own artifact there.
+`WORK_DIR/<32-hex job_id>/`. A post is a *list* of media items (one for a plain
+reel/photo, up to ten for a carousel), numbered `media_01`, `media_02`, ... in post
+order — that index is the join key across every artifact: `metadata.json` (with a
+`media` manifest of `{index, type, path}`), `media_NN.<ext>`, `audio/media_NN.mp3`
+(video items only), `frames/media_NN/frame_%04d.png`, `transcript.json` (`{"media":
+[{index, text, segments, language}]}`, video items only), `ocr.json` (`[{index,
+type, results}]`), `places.json`. A step reads what its predecessor wrote and
+raises `PipelineError("... call /download first")` if it's missing. This is what
+makes the per-step endpoints independently callable and re-runnable. A new step
+should follow the same pattern: read inputs from `job_dir`, write its own artifact
+there, keyed by `index`.
 
 **Error taxonomy drives HTTP status.** `PipelineError` is the user-facing failure
 type; `InvalidInputError` subclasses it. `main._http_error` maps `InvalidInputError`

@@ -31,4 +31,5 @@ services:
             # FRAME_SCALE_HEIGHT: "720"
             # SCENE_THRESHOLD: "0.3"
             # OCR_DEDUPE_THRESHOLD: "90"
+            # OCR_MIN_CONFIDENCE: "50"
             # LOG_LEVEL: "INFO"

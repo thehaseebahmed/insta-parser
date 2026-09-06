@@ -1,40 +1,106 @@
 # insta-parser
 
-Small FastAPI microservice that downloads an Instagram post/reel, extracts
-its audio + candidate frames, transcribes the audio (faster-whisper), and
-OCRs the frames (Tesseract). Built to be called from n8n via HTTP.
+## Overview
 
-Each job gets its own subfolder under `WORK_DIR` (a random `job_id`), so the
-per-step endpoints can be called independently and re-run without stepping
-on each other.
+`insta-parser` turns an Instagram post URL — a reel, a single image, or a
+carousel of either — into structured text: post metadata, a spoken-audio
+transcript for every video, and OCR of on-screen text for every image and
+video, each attributed back to the specific item it came from. It can also
+optionally extract real-world places (restaurants, landmarks, cities)
+mentioned in a post and resolve them to a rating and Maps link.
 
-Agent-facing docs live in [`skills/insta-parser/`](skills/insta-parser/) —
-`SKILL.md` for calling the service, `reference/operations.md` for running it.
+It's a small, self-hosted FastAPI service — plain JSON over HTTP, no
+authentication, no SDK, no CLI. Built to be called from n8n workflows, LLM
+agents, or any script that can make an HTTP request.
 
-## Endpoints
+If you're calling this from an agent, see
+[`skills/insta-parser/`](skills/insta-parser/) — `SKILL.md` covers calling
+the service, `reference/operations.md` covers running and tuning it.
 
-| Method | Path | Notes |
-|---|---|---|
-| `GET` | `/health` | Health check |
-| `POST` | `/download` | Fetch a post and download its video. Synchronous. |
-| `POST` | `/extract-audio` | Extract mp3 audio from the downloaded video |
-| `POST` | `/transcribe` | Transcribe the audio with faster-whisper |
-| `POST` | `/extract-frames` | Grab scene-change frames as PNGs |
-| `POST` | `/ocr` | OCR the extracted frames, deduping near-identical results |
-| `POST` | `/process` | **Async.** Queues the full pipeline, returns `202` + a `job_id`. Includes place-metadata enrichment (optional, see below) |
-| `GET` | `/jobs/{job_id}` | Status/result of a `/process` run |
-| `DELETE` | `/jobs/{job_id}` | Delete a job's files |
+## How it works
 
-The per-step endpoints are synchronous — each finishes well inside a normal
-HTTP timeout. `/process` is not: whisper transcription alone can run for
-minutes, so it returns immediately and you poll `/jobs/{job_id}`.
+Each request to `/download` creates a `job_id` with its own folder, and every
+step after that operates **per media item**: a plain reel or single photo is
+one item (index 1), a carousel is N items in post order. Video items get
+audio extraction and transcription; every item — video or image — gets frame
+extraction and OCR. An optional final step extracts and resolves place
+mentions across the whole post.
 
-Interactive API docs are served by FastAPI directly from the same request/
-response models used above: Swagger UI at `/docs` (try requests against a
-running instance right from the browser), ReDoc at `/redoc`, and the raw
-OpenAPI schema at `/openapi.json`.
+```mermaid
+flowchart TD
+    A[Instagram URL] --> B["/download<br/>metadata + media manifest"]
+    B --> C{For each media item}
+    C -->|video| D["/extract-audio<br/>(ffmpeg)"]
+    D --> E["/transcribe<br/>(faster-whisper)"]
+    C -->|video or image| F["/extract-frames<br/>(ffmpeg)"]
+    F --> G["/ocr<br/>(Tesseract)"]
+    E --> H["Join per item:<br/>transcript + ocr"]
+    G --> H
+    H --> I{Place enrichment<br/>configured?}
+    I -->|yes| J["litellm extraction +<br/>Google Maps resolution"]
+    I -->|no| K["places: []"]
+    J --> L[Result]
+    K --> L
+```
 
-## Configuration (env vars)
+`/process` runs this whole pipeline for you, but it's asynchronous — whisper
+transcription alone can run for minutes, well past a normal HTTP timeout — so
+it queues the job and returns immediately. You poll `GET /jobs/{job_id}`
+until it reaches a terminal status:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant insta-parser
+    Client->>insta-parser: POST /process {url}
+    insta-parser-->>Client: 202 {job_id, status: "queued"}
+    loop poll every 5-10s
+        Client->>insta-parser: GET /jobs/{job_id}
+        insta-parser-->>Client: {status: "running", step: "..."}
+    end
+    Client->>insta-parser: GET /jobs/{job_id}
+    insta-parser-->>Client: {status: "done", result: {...}}
+```
+
+If you only need one piece of the pipeline, or need to skip a step (e.g. a
+silent reel where transcription is wasted work), the per-step endpoints let
+you call `/download`, `/extract-audio`, `/transcribe`, `/extract-frames`, and
+`/ocr` independently and synchronously — see [Usage](#usage) below.
+
+## Setup
+
+**Prerequisites:** Docker. `ffmpeg` and `tesseract` are bundled in the image
+— nothing to install on the host.
+
+### Running
+
+From the published image:
+
+```bash
+docker run -d --name insta-parser -p 8420:8000 \
+  -v ${HOME}/volumes/insta-parser/data:/data \
+  -e TZ=Europe/Amsterdam \
+  ghcr.io/thehaseebahmed/insta-parser:main
+```
+
+`:main` tracks the latest commit on `main`. Image tags follow semver
+(`:X.Y.Z`) for stable deployments — there is no `:latest` tag.
+
+Or point a `docker-compose.yaml`'s `image:` at
+`ghcr.io/thehaseebahmed/insta-parser:<version>` — see this repo's own
+[`docker-compose.yaml`](docker-compose.yaml) for the env var layout (it
+builds locally for development; swap `build:` for a pinned `image:` for
+deployment):
+
+```bash
+docker compose up -d --build
+docker compose logs -f
+```
+
+The service listens on `8000` inside the container. It's deliberately not
+exposed via a reverse proxy or Tailscale by default — there's no auth on it.
+
+### Configuration (env vars)
 
 | Var | Default | Notes |
 |---|---|---|
@@ -49,10 +115,11 @@ OpenAPI schema at `/openapi.json`.
 | `WHISPER_VAD_FILTER` | `true` | Skip non-speech audio (silence, music, ASMR mouth sounds) via Silero VAD before decoding, to avoid whisper hallucinating text on those stretches |
 | `TRANSCRIBE_CONCURRENCY` | `1` | How many transcriptions may run at once |
 | `FFMPEG_TIMEOUT` | `300` | Per-invocation ffmpeg timeout, seconds |
-| `MAX_FRAMES` | `60` | Cap on extracted frames per video |
+| `MAX_FRAMES` | `60` | Cap on extracted frames per video item (each image item always contributes exactly 1) |
 | `FRAME_SCALE_HEIGHT` | `720` | Frames are downscaled to this height before OCR |
 | `SCENE_THRESHOLD` | `0.3` | ffmpeg scene-change sensitivity (higher = fewer frames) |
 | `OCR_DEDUPE_THRESHOLD` | `90` | rapidfuzz similarity (0-100) above which consecutive OCR text is dropped as a duplicate |
+| `OCR_MIN_CONFIDENCE` | `50` | Mean per-word Tesseract confidence (0-100) below which an OCR result is dropped as noise |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `LITELLM_BASE_URL` | unset | Base URL of a litellm proxy, **without** a `/v1` suffix (e.g. `http://172.17.0.1:4000`) |
 | `LITELLM_API_KEY` | unset | Bearer key for the litellm proxy, if it requires one |
@@ -61,6 +128,10 @@ OpenAPI schema at `/openapi.json`.
 | `PLACE_EXTRACTION_MAX_CHARS` | `4000` | How much combined caption/transcript/OCR text to send to the model |
 | `GOOGLE_MAPS_API_KEY` | unset | Google Maps Places API (New) key, used to resolve extracted places to a rating + Maps URL |
 | `GOOGLE_MAPS_TIMEOUT` | `10` | Timeout (seconds) for each Places API lookup |
+
+Place-metadata enrichment (`LITELLM_*` and `GOOGLE_MAPS_*`) is optional and
+made of two independent pieces — see [Interpreting the
+output](#interpreting-the-output) below for how it behaves when left unset.
 
 ### Optional authenticated Instagram session
 
@@ -81,75 +152,33 @@ environment:
     IG_SESSION_FILE: "/data/session-your_ig_username"
 ```
 
-## Running
+## Usage
 
-### From the published image
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/health` | Health check |
+| `POST` | `/download` | Fetch a post and download its media (video, image, or carousel). Synchronous. |
+| `POST` | `/extract-audio` | Extract mp3 audio from each video item (`[]` if the post has none) |
+| `POST` | `/transcribe` | Transcribe each video item's audio with faster-whisper |
+| `POST` | `/extract-frames` | Grab OCR-ready frames per item: scene-change PNGs for video, one PNG for an image |
+| `POST` | `/ocr` | OCR each item's extracted frames, deduping near-identical results within that item |
+| `POST` | `/process` | **Async.** Queues the full pipeline, returns `202` + a `job_id`. Includes place-metadata enrichment (optional) |
+| `GET` | `/jobs/{job_id}` | Status/result of a `/process` run |
+| `DELETE` | `/jobs/{job_id}` | Delete a job's files |
 
-```bash
-docker run -d --name insta-parser -p 8420:8000 \
-  -v ${HOME}/volumes/insta-parser/data:/data \
-  -e TZ=Europe/Amsterdam \
-  ghcr.io/thehaseebahmed/insta-parser:main
-```
+The per-step endpoints are synchronous — each finishes well inside a normal
+HTTP timeout. Prefer `/process` unless you specifically need to skip work.
 
-`:main` tracks the latest commit on `main`. For a stable deployment, pin a
-released version instead (`:X.Y.Z` — see [Releases](#releases)); there is no
-`:latest` tag.
-
-Or use a `docker-compose.yaml` pointing `image:` at
-`ghcr.io/thehaseebahmed/insta-parser:<version>` — see this repo's own
-[`docker-compose.yaml`](docker-compose.yaml) for the env var layout (it builds
-locally for development; swap `build:` for a pinned `image:` for deployment).
-
-### From source (development)
-
-```bash
-docker compose up -d --build
-docker compose logs -f
-```
-
-The service listens on `8000` inside the container. It's deliberately not
-exposed via a reverse proxy or Tailscale by default — there's no auth on it.
-
-## Releases
-
-Pushing a `vX.Y.Z` tag builds and publishes the Docker image to
-`ghcr.io/thehaseebahmed/insta-parser:X.Y.Z`.
-
-Every push to `main` also rebuilds and republishes
-`ghcr.io/thehaseebahmed/insta-parser:main` as a rolling image.
-
-Every push to an open PR's branch builds and publishes
-`ghcr.io/thehaseebahmed/insta-parser:pr-<number>-<short sha>` (e.g.
-`pr-1-460bbe1`) — an image of that exact commit, to pull and test before
-merging. See [`.github/workflows/release.yml`](.github/workflows/release.yml).
-
-## Testing
-
-Every pull request runs [`.github/workflows/test.yml`](.github/workflows/test.yml):
-the Python test suite, independent of any real Instagram/ffmpeg/tesseract/
-whisper calls (those are mocked — no external services, binaries, or
-credentials needed).
-
-```bash
-# Python (FastAPI app + pipeline + places enrichment)
-pip install -r requirements.txt -r requirements-test.txt
-pytest
-```
-
-## Example usage
-
-```bash
-BASE=http://localhost:8420
-
-# Health check
-curl -s $BASE/health
-# => {"status":"ok"}
-```
+Interactive API docs are served by FastAPI directly from the same request/
+response models used above: Swagger UI at `/docs` (try requests against a
+running instance right from the browser), ReDoc at `/redoc`, and the raw
+OpenAPI schema at `/openapi.json`.
 
 ### All-in-one (async)
 
 ```bash
+BASE=http://localhost:8420
+
 # Queue the job — returns immediately with 202
 curl -sX POST $BASE/process \
   -H 'Content-Type: application/json' \
@@ -159,11 +188,17 @@ curl -sX POST $BASE/process \
 # Poll until status is "done" (or "error")
 curl -s $BASE/jobs/3f1c...
 # => {"job_id":"3f1c...","status":"running","step":"transcribe","result":null,"error":null}
-# => {"job_id":"3f1c...","status":"done","step":null,"result":{"metadata":{"username":"...", ...},
-#     "transcript":{"text":"...","segments":[...]},"ocr_results":[...],
+# => {"job_id":"3f1c...","status":"done","step":null,"result":{
+#     "metadata":{"username":"...", ...},
+#     "media":[{"index":1,"type":"video",
+#               "transcript":{"text":"...","segments":[...],"language":"en"},
+#               "ocr":[{"text":"...","confidence":92.4}]}],
 #     "places":[{"name":"Joe's Pizza","city":"Rome","country":"Italy","rating":4.6,
 #                "maps_url":"https://maps.google.com/?cid=..."}]},"error":null}
 ```
+
+A carousel returns one entry per item in `result.media`, in post order, each
+with its own `transcript` (`null` for an image item) and `ocr`.
 
 In n8n: an HTTP Request node for `POST /process`, then a Wait node, then an
 HTTP Request node for `GET /jobs/{{ $json.job_id }}` in a loop with an IF node
@@ -176,7 +211,8 @@ checking `status == "done"`.
 curl -sX POST $BASE/download \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://www.instagram.com/reel/ABC123xyz/"}'
-# => {"job_id": "...", "metadata": {"username": "...", "caption": "...", "timestamp": "...", ...}}
+# => {"job_id": "...", "metadata": {"username": "...", "caption": "...", "timestamp": "...", ...},
+#     "media": [{"index": 1, "type": "video", "path": "/data/.../media_01.mp4"}]}
 
 JOB_ID=<job_id from above>
 
@@ -205,59 +241,42 @@ curl -sX DELETE $BASE/jobs/$JOB_ID
 # => {"job_id": "...", "status": "deleted"}
 ```
 
-Place-metadata enrichment (below) only runs as part of `/process` — there's no
+Place-metadata enrichment only runs as part of `/process` — there's no
 per-step endpoint for it.
 
-## Place-metadata enrichment (optional)
-
-If configured, `/process` pulls place mentions — restaurants, landmarks,
-cities — out of the reel's caption, tagged location, transcript, and OCR
-text, and attaches them as `result.places`: an array of
-`{name, city, country, rating, maps_url}`.
-
-This is two independent, optional pieces:
-
-1. **Extraction** goes through a self-hosted `litellm` proxy rather than
-   adding a new model dependency to this service — point `LITELLM_MODEL` at
-   whatever model alias you've registered there (a local Ollama model or
-   otherwise), and `LITELLM_BASE_URL` at the proxy's base URL.
-2. **Resolution** looks each extracted place up via the [Google Maps Places
-   API (New)](https://developers.google.com/maps/documentation/places/web-service/text-search)
-   for a rating and canonical Maps URL. Requires a `GOOGLE_MAPS_API_KEY` with
-   that API enabled on its Google Cloud project — each lookup is a billable
-   request.
-
-Leave either unset and that piece is simply skipped: no `LITELLM_MODEL` means
-extraction doesn't run at all and `places` comes back `[]`; no
-`GOOGLE_MAPS_API_KEY` means extracted places still come back but with
-`rating`/`maps_url` set to `null`. A failed litellm or Maps call is logged and
-treated the same as unconfigured — it never fails `/process`. Since `[]` means
-both "not configured" and "configured, found nothing", don't treat an empty
-`places` as proof the reel has none — see the
-[`insta-parser` skill](skills/insta-parser/SKILL.md) for how to read it.
-
-## Notes
+### Interpreting the output
 
 - **Job state is in memory.** A container restart loses the status of any
   in-flight or completed `/process` run (the files on the volume survive).
   Fine for a homelab tool; don't build a long-running workflow that assumes
   otherwise. Finished job records are evicted after `JOB_TTL_HOURS`, so
-  fetch a result before then — the same sweep keeps them from accumulating.
+  fetch a result before then.
 - **Cleanup.** `/process` deletes its job folder when it finishes unless
   `KEEP_FILES=true`. The per-step endpoints don't, so either call
   `DELETE /jobs/{job_id}` at the end of your workflow or let the
   `JOB_TTL_HOURS` sweep collect them.
-- **Response paths.** When `KEEP_FILES=false`, `/process` omits `video_path`
-  and per-frame paths from its result, since those files no longer exist.
+- **Response paths.** `/process` never returns on-disk paths — `result.media`
+  has no `path`, and its OCR entries have no `frame` — regardless of
+  `KEEP_FILES`; use the per-step endpoints for a real path to a file that's
+  still on disk.
 - **Concurrency.** Each in-flight `/process` run holds one of FastAPI's
   threadpool workers, and `TRANSCRIBE_CONCURRENCY` (default 1) queues the
   whisper step so parallel jobs don't thrash the CPU. `/health` and
   `GET /jobs/{job_id}` are async, so polling stays responsive no matter how
   many pipelines are running.
-- **Error codes.** `400` = bad input (unparseable URL, malformed `job_id`,
-  non-video post), `404` = unknown `job_id`, `422` = a step ran out of order
-  (e.g. `/ocr` before `/extract-frames`), `502` = Instagram fetch failed
-  (rate-limited, private, or removed post). Errors are also logged with the
-  `job_id` and step, visible via `docker logs`.
-- **ffmpeg deprecation.** Frame extraction uses `-vsync vfr`; ffmpeg 6+ warns
-  and prefers `-fps_mode vfr`. Debian's build still accepts `-vsync`.
+- **Error codes.** `400` = bad input (unparseable URL, malformed `job_id`),
+  `404` = unknown `job_id`, `422` = a step ran out of order (e.g. `/ocr`
+  before `/extract-frames`), `502` = Instagram fetch failed (rate-limited,
+  private, or removed post). Errors are also logged with the `job_id` and
+  step, visible via `docker logs`.
+- **`result.places`** is optional enrichment: a local model (via litellm)
+  extracts place mentions from the caption, tagged location, and every
+  item's transcript/OCR text, then Google Maps resolves each one to a rating
+  and canonical Maps URL. It's always a list; if `LITELLM_MODEL` isn't set,
+  extraction doesn't run and `places` comes back `[]`. If `GOOGLE_MAPS_API_KEY`
+  isn't set, extracted places still come back but with `rating`/`maps_url`
+  as `null`. A failed litellm or Maps call is logged and treated the same as
+  unconfigured — it never fails `/process`. Since `[]` means both "not
+  configured" and "configured, found nothing," don't treat an empty `places`
+  as proof the post has none — see the
+  [`insta-parser` skill](skills/insta-parser/SKILL.md) for how to read it.
